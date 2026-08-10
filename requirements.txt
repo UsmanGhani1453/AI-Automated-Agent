@@ -1,0 +1,13 @@
+fastapi
+uvicorn
+pydantic
+transformers
+python-dotenv
+requests
+beautifulsoup4
+openai
+playwright
+torch
+datasets
+trl
+unsloth

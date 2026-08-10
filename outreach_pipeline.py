@@ -1,96 +1,62 @@
-import requests
-from bs4 import BeautifulSoup
-import openai # Or your preferred AI endpoint
 import time
+import smtplib
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
+import requests
+import scraper
 
-# Configure your API key
-# openai.api_key = "YOUR_API_KEY"
+SMTP_SERVER = "smtp.gmail.com"
+SMTP_PORT = 587
+SENDER_EMAIL = "natasharoman5667@gmail.com"
+SENDER_PASSWORD = "jfvrpdosqjdrxgic" 
 
-def scrape_truck_leads(directory_url):
-    """Scrapes driver/owner data f  rom a target website."""
-    print(f"Scraping leads from {directory_url}...")
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    
+def send_gmail(recipient_email, subject, body):
     try:
-        response = requests.get(directory_url, headers=headers)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        leads = []
-        # Update these selectors based on the actual website's HTML structure
-        for card in soup.find_all('div', class_='trucker-profile-card'):
-            lead = {
-                "name": card.find('h2', class_='owner-name').text.strip(),
-                "company": card.find('p', class_='company-name').text.strip(),
-                "fleet_size": card.find('span', class_='fleet-size').text.strip(),
-                "email": card.find('a', class_='contact-email')['href'].replace('mailto:', '')
-            }
-            leads.append(lead)
-            
-        return leads
-    
+        msg = MIMEMultipart()
+        msg['From'] = SENDER_EMAIL
+        msg['To'] = recipient_email
+        msg['Subject'] = subject
+        msg.attach(MIMEText(body, 'plain'))
+
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT)
+        server.starttls()
+        server.login(SENDER_EMAIL, SENDER_PASSWORD)
+        server.sendmail(SENDER_EMAIL, recipient_email, msg.as_string())
+        server.quit()
+        print(f"Successfully sent email to {recipient_email}")
     except Exception as e:
-        print(f"Error scraping data: {e}")
-        return []
+        print(f"Failed to send email: {e}")
 
-def generate_personalized_message(lead_data):
-    """Passes the scraped data to the LLM to write a unique email."""
-    print(f"Generating message for {lead_data['name']}...")
-    
-    prompt = f"""
-    Write a short, highly personalized cold email to a trucking company owner.
-    Do not sound like a robot. Keep it under 4 sentences.
-    
-    Data:
-    - Name: {lead_data['name']}
-    - Company: {lead_data['company']}
-    - Fleet Size: {lead_data['fleet_size']}
-    
-    The goal is to ask if they have capacity for new dedicated freight lanes.
-    """
+def run_pipeline():
+    print("Running scraper to fetch live leads...")
+    leads = scraper.scrape_truckerdb()
+    print(f"Successfully grabbed {len(leads)} leads. Processing through local AI...")
 
-    try:
-        # Update this call to match your current API endpoint syntax
-        response = openai.chat.completions.create(
-            model="gpt-4o", # Or Gemini/Claude
-            messages=[
-                {"role": "system", "content": "You are a logistics partnership manager."},
-                {"role": "user", "content": prompt}
-            ],
-            temperature=0.7 # Slight variance helps bypass spam filters
-        )
-        return response.choices[0].message.content
-    
-    except Exception as e:
-        print(f"Error generating message: {e}")
-        return None
-
-def main():
-    # Replace with the actual URL you want to target
-    target_url = "https://example-trucking-directory.com/carriers"
-    
-    # 1. Get the data
-    truck_leads = scrape_truck_leads(target_url)
-    
-    if not truck_leads:
-        print("No leads found. Check your HTML selectors.")
-        return
-
-    # 2. Process each lead
-    for lead in truck_leads:
-        message = generate_personalized_message(lead)
-        
-        if message:
-            print("-" * 40)
-            print(f"To: {lead['email']}")
-            print(f"Subject: Quick question for {lead['company']}")
-            print(f"Body:\n{message}\n")
+    for lead in leads:
+        try:
+            # Call your local FastAPI AI backend
+            response = requests.post(
+                "http://127.0.0.1:8000/generate-email",
+                json={
+                    "officer": lead["officer"].title(),
+                    "location": lead["location"].title()
+                }
+            )
             
-            # Here you would call your existing email dispatch function
-            # send_email(lead['email'], subject, message)
+            result = response.json()
+            generated_content = result.get("generated_email")
             
-            # Pause to avoid rate limits and spam flags
-            time.sleep(5) 
+            if generated_content:
+                print(f"Generated email for {lead['officer']}. Sending to {lead['email']}...")
+                subject = f"Dispatching Opportunity - {lead['location'].title()}"
+                
+                # Uncomment the line below once your Gmail credentials/App Password are set
+                # send_gmail(lead["email"], subject, generated_content)
+                
+            time.sleep(2)
+            
+        except Exception as e:
+            print(f"Error processing lead {lead['officer']}: {e}")
 
 if __name__ == "__main__":
-    main()
+    run_pipeline()

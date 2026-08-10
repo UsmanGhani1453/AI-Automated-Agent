@@ -1,54 +1,43 @@
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from transformers import pipeline
-import smtplib
-from email.message import EmailMessage
+import requests
 
-app = FastAPI(title="Trucking Dispatch Agent API")
+app = FastAPI(title="Local Dispatch AI Service")
 
-# Load your local trained model
-generator = pipeline("text-generation", model="./your-trained-model-folder")
-
-# Your Google App Password credentials
-GMAIL_USER = "your_personal_email@gmail.com"
-GMAIL_APP_PASSWORD = "your-16-character-app-password"
-
-class LeadData(BaseModel):
+class LeadRequest(BaseModel):
     officer: str
-    email: str
     location: str
 
-def send_gmail(recipient_email: str, subject: str, body: str):
-    """Handles the secure SMTP connection to Gmail."""
-    msg = EmailMessage()
-    msg.set_content(body)
-    msg['Subject'] = subject
-    msg['From'] = GMAIL_USER
-    msg['To'] = recipient_email
-
+@app.post("/generate-email")
+def generate_email(lead: LeadRequest):
     try:
-        with smtplib.SMTP_SSL('smtp.gmail.com', 465) as server:
-            server.login(GMAIL_USER, GMAIL_APP_PASSWORD)
-            server.send_message(msg)
-            print(f"Email successfully sent to {recipient_email}")
-    except Exception as e:
-        print(f"Failed to send email to {recipient_email}: {e}")
+        prompt = f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
 
-@app.post("/process-lead")
-def process_lead(lead: LeadData, background_tasks: BackgroundTasks):
-    """Receives data from the scraper, generates the email, and sends it."""
-    
-    # 1. Generate the personalized email using your AI model
-    prompt = f"Officer: {lead.officer}, Location: {lead.location}"
-    result = generator(prompt, max_new_tokens=60, num_return_sequences=1)
-    email_body = result[0]['generated_text']
-    
-    # 2. Dispatch the email in the background so the API doesn't hang
-    background_tasks.add_task(
-        send_gmail, 
-        recipient_email=lead.email, 
-        subject=f"Dispatching routes out of {lead.location}", 
-        body=email_body
-    )
-    
-    return {"status": "Lead processed and email queued", "target": lead.email}
+### Instruction:
+Write a personalized dispatching offer email.
+
+### Input:
+Officer: {lead.officer}, Location: {lead.location}
+
+### Response:"""
+
+        # Send request to your local Ollama server running gemma2:2b
+        response = requests.post(
+            "http://localhost:11434/api/generate",
+            json={
+                "model": "gemma2:2b",
+                "prompt": prompt,
+                "stream": False
+            }
+        )
+        
+        result = response.json()
+        
+        return {
+            "status": "success",
+            "officer": lead.officer,
+            "generated_email": result.get("response", "").strip()
+        }
+        
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=str(e))
