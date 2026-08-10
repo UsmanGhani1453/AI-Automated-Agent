@@ -7,7 +7,7 @@ app = FastAPI(title="Local Dispatch AI Service")
 class LeadRequest(BaseModel):
     officer: str
     location: str
-    company: str = ""
+    company: str = "Natasha & co"
     fleet_size: str = "1"
 
 @app.post("/generate-email")
@@ -18,7 +18,7 @@ def generate_email(lead: LeadRequest):
 
 ### Instruction:
 Write a complete, formal, and professional outreach email for freight dispatching.
-You MUST write out every detail with real information and NEVER use square brackets like [Your Name], [Company], or [Date].
+You MUST write out every detail with real information and NEVER use square brackets like [Your Name], [Company] = Natasha & co. , or [Date].
 
 SENDER DETAILS TO USE FOR SIGN-OFF:
 - Name: Natasha Roman
