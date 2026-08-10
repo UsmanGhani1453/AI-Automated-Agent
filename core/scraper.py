@@ -5,7 +5,7 @@ def scrape_truckerdb():
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=False) 
         
-        context = browser.new_context(storage_state="playwright_auth.json")
+        context = browser.new_context(storage_state="auth/playwright_auth.json")
         page = context.new_page()
         
         print("Navigating directly to the TruckerDB dashboard...")
