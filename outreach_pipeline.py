@@ -8,7 +8,7 @@ import scraper
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
 SENDER_EMAIL = "natasharoman5667@gmail.com"
-SENDER_PASSWORD = "jfvrpdosqjdrxgic" 
+SENDER_PASSWORD = "xqttjpymnocymvec" 
 
 def send_gmail(recipient_email, subject, body):
     try:
@@ -39,7 +39,9 @@ def run_pipeline():
                 "http://127.0.0.1:8000/generate-email",
                 json={
                     "officer": lead["officer"].title(),
-                    "location": lead["location"].title()
+                    "location": lead["location"].title(),
+                    "company": lead.get("company", "").title(),
+                    "fleet_size": str(lead.get("fleet_size", "1"))
                 }
             )
             
@@ -51,7 +53,7 @@ def run_pipeline():
                 subject = f"Dispatching Opportunity - {lead['location'].title()}"
                 
                 # Uncomment the line below once your Gmail credentials/App Password are set
-                # send_gmail(lead["email"], subject, generated_content)
+                send_gmail(lead["email"], subject, generated_content)
                 
             time.sleep(2)
             
