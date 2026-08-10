@@ -3,7 +3,7 @@ import smtplib
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
 import requests
-import scraper
+import core.scraper as scraper
 
 SMTP_SERVER = "smtp.gmail.com"
 SMTP_PORT = 587
@@ -34,7 +34,6 @@ def run_pipeline():
 
     for lead in leads:
         try:
-            # Call your local FastAPI AI backend
             response = requests.post(
                 "http://127.0.0.1:8000/generate-email",
                 json={
@@ -52,7 +51,6 @@ def run_pipeline():
                 print(f"Generated email for {lead['officer']}. Sending to {lead['email']}...")
                 subject = f"Dispatching Opportunity - {lead['location'].title()}"
                 
-                # Uncomment the line below once your Gmail credentials/App Password are set
                 send_gmail(lead["email"], subject, generated_content)
                 
             time.sleep(2)

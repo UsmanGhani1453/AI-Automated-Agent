@@ -13,7 +13,6 @@ class LeadRequest(BaseModel):
 @app.post("/generate-email")
 def generate_email(lead: LeadRequest):
     try:
-        # Prompt explicitly providing real sender info and instructing full email structure
         prompt = f"""Below is an instruction that describes a task, paired with an input that provides further context. Write a response that appropriately completes the request.
 
 ### Instruction:
@@ -49,7 +48,6 @@ Officer: {lead.officer}, Location: {lead.location}, Company: {lead.company}
         result = response.json()
         generated_text = result.get("response", "").strip()
 
-        # Clean up any leftover Subject headers
         lines = [line for line in generated_text.splitlines() if not line.strip().startswith("**Subject:") and not line.strip().startswith("Subject:")]
         clean_email = "\n".join(lines).strip()
 
