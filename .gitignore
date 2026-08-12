@@ -1,2 +1,5 @@
 .env
 gemma-2-2b-it.Q4_K_M.gguf
+*.gguf
+venv/
+__pycache__/
