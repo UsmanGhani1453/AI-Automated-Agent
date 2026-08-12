@@ -1,0 +1,14 @@
+
+FROM gemma-2-2b-it.Q4_K_M.gguf
+TEMPLATE """<start_of_turn>user
+{{ if .System }}{{ .System }} {{ end }}{{ .Prompt }}<end_of_turn>
+<start_of_turn>model
+{{ .Response }}<end_of_turn>
+"""
+PARAMETER repeat_penalty 1
+PARAMETER stop "<start_of_turn>"
+PARAMETER stop "<end_of_turn>"
+PARAMETER penalize_newline false
+PARAMETER temperature 1.5
+PARAMETER min_p 0.1
+PARAMETER num_ctx 4096
