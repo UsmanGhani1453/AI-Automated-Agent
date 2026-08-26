@@ -1,0 +1,352 @@
+"""
+Thin repository layer. Every module that needs persistence goes through here
+instead of writing raw SQL inline, so the schema can change in one place.
+"""
+from app.database.database import get_conn, now, dumps, loads, row_to_dict, rows_to_dicts
+
+
+class LeadRepository:
+    @staticmethod
+    def create(officer, company, fleet_size, location, email, category=None):
+        with get_conn() as conn:
+            cur = conn.execute(
+                """INSERT INTO leads (officer, company, fleet_size, location, email, category, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (officer, company, fleet_size, location, email, category, now()),
+            )
+            return cur.lastrowid
+
+    @staticmethod
+    def get(lead_id):
+        with get_conn() as conn:
+            row = conn.execute("SELECT * FROM leads WHERE id=?", (lead_id,)).fetchone()
+            return row_to_dict(row)
+
+    @staticmethod
+    def get_by_email(email):
+        with get_conn() as conn:
+            row = conn.execute("SELECT * FROM leads WHERE email=?", (email,)).fetchone()
+            return row_to_dict(row)
+
+    @staticmethod
+    def find_or_create(lead_data):
+        existing = LeadRepository.get_by_email(lead_data["email"])
+        if existing:
+            return existing
+        lead_id = LeadRepository.create(
+            lead_data.get("officer"), lead_data.get("company"),
+            lead_data.get("fleet_size"), lead_data.get("location"),
+            lead_data["email"], lead_data.get("category"),
+        )
+        return LeadRepository.get(lead_id)
+
+    @staticmethod
+    def mark_contacted(lead_id):
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE leads SET status='contacted', last_contacted_at=? WHERE id=?",
+                (now(), lead_id),
+            )
+
+    @staticmethod
+    def set_status(lead_id, status):
+        with get_conn() as conn:
+            conn.execute("UPDATE leads SET status=? WHERE id=?", (status, lead_id))
+
+    @staticmethod
+    def recently_contacted(lead_id, days=14):
+        with get_conn() as conn:
+            row = conn.execute(
+                """SELECT last_contacted_at FROM leads WHERE id=?""", (lead_id,)
+            ).fetchone()
+            if not row or not row["last_contacted_at"]:
+                return False
+            from datetime import datetime, timezone
+            last = datetime.fromisoformat(row["last_contacted_at"])
+            delta = datetime.now(timezone.utc) - last
+            return delta.days < days
+
+
+class SuppressionRepository:
+    @staticmethod
+    def is_suppressed(email):
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT 1 FROM suppression_list WHERE email=?", (email,)
+            ).fetchone()
+            return row is not None
+
+    @staticmethod
+    def add(email, reason=""):
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO suppression_list (email, reason, created_at) VALUES (?, ?, ?)",
+                (email, reason, now()),
+            )
+
+
+class EmailRepository:
+    @staticmethod
+    def create(lead_id, strategy, components, body, quality_score, analyzer_report, version=1):
+        with get_conn() as conn:
+            cur = conn.execute(
+                """INSERT INTO emails
+                   (lead_id, strategy, components_json, body, quality_score,
+                    analyzer_report_json, version, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (lead_id, strategy, dumps(components), body, quality_score,
+                 dumps(analyzer_report), version, now()),
+            )
+            return cur.lastrowid
+
+    @staticmethod
+    def get(email_id):
+        with get_conn() as conn:
+            row = conn.execute("SELECT * FROM emails WHERE id=?", (email_id,)).fetchone()
+            d = row_to_dict(row)
+            if d:
+                d["components"] = loads(d.pop("components_json"), {})
+                d["analyzer_report"] = loads(d.pop("analyzer_report_json"), {})
+            return d
+
+    @staticmethod
+    def set_user_edit(email_id, edited_body):
+        with get_conn() as conn:
+            conn.execute("UPDATE emails SET user_edited_body=? WHERE id=?", (edited_body, email_id))
+
+    @staticmethod
+    def approve(email_id):
+        with get_conn() as conn:
+            conn.execute("UPDATE emails SET approved=1 WHERE id=?", (email_id,))
+
+    @staticmethod
+    def mark_sent(email_id):
+        with get_conn() as conn:
+            conn.execute("UPDATE emails SET sent=1, sent_at=? WHERE id=?", (now(), email_id))
+
+    @staticmethod
+    def recent_for_lead(lead_id, limit=5):
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM emails WHERE lead_id=? ORDER BY id DESC LIMIT ?",
+                (lead_id, limit),
+            ).fetchall()
+            return rows_to_dicts(rows)
+
+
+class ComponentRepository:
+    """Stores individual email building blocks (greeting/opening/cta/etc) and their learned scores."""
+
+    @staticmethod
+    def upsert(component_type, text):
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM email_components WHERE component_type=? AND text=?",
+                (component_type, text),
+            ).fetchone()
+            if row:
+                return row_to_dict(row)
+            cur = conn.execute(
+                """INSERT INTO email_components (component_type, text, created_at)
+                   VALUES (?, ?, ?)""",
+                (component_type, text, now()),
+            )
+            return {
+                "id": cur.lastrowid, "component_type": component_type, "text": text,
+                "positive_score": 0.5, "uses": 0, "positive_count": 0,
+                "negative_count": 0, "reply_count": 0,
+            }
+
+    @staticmethod
+    def top_for_type(component_type, limit=5):
+        with get_conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM email_components WHERE component_type=?
+                   ORDER BY positive_score DESC, uses DESC LIMIT ?""",
+                (component_type, limit),
+            ).fetchall()
+            return rows_to_dicts(rows)
+
+    @staticmethod
+    def record_usage(component_id):
+        with get_conn() as conn:
+            conn.execute("UPDATE email_components SET uses = uses + 1 WHERE id=?", (component_id,))
+
+    @staticmethod
+    def apply_feedback(component_id, rating, replied=False):
+        """Update a component's running score using a simple explainable formula.
+
+        score = (positive_count + 2*reply_count) / (positive_count + negative_count + 2*reply_count + smoothing)
+        This is Laplace-smoothed so a component with few samples doesn't swing wildly,
+        and a reply (strong positive signal) counts double.
+        """
+        with get_conn() as conn:
+            row = conn.execute("SELECT * FROM email_components WHERE id=?", (component_id,)).fetchone()
+            if not row:
+                return
+            pos = row["positive_count"] + (1 if rating >= 4 else 0)
+            neg = row["negative_count"] + (1 if rating <= 2 else 0)
+            replies = row["reply_count"] + (1 if replied else 0)
+            smoothing = 2.0
+            score = (pos + 2 * replies + smoothing * 0.5) / (pos + neg + 2 * replies + smoothing)
+            conn.execute(
+                """UPDATE email_components
+                   SET positive_count=?, negative_count=?, reply_count=?, positive_score=?
+                   WHERE id=?""",
+                (pos, neg, replies, score, component_id),
+            )
+
+
+class FeedbackRepository:
+    @staticmethod
+    def create(email_id, rating, action, comment="", replied=False):
+        with get_conn() as conn:
+            cur = conn.execute(
+                """INSERT INTO feedback (email_id, rating, action, comment, replied, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (email_id, rating, action, comment, int(replied), now()),
+            )
+            return cur.lastrowid
+
+
+class ExperienceRepository:
+    @staticmethod
+    def create(lead_id, email_id, context, decision, evaluation, outcome, feedback):
+        with get_conn() as conn:
+            cur = conn.execute(
+                """INSERT INTO experiences
+                   (lead_id, email_id, context_json, decision_json, evaluation_json,
+                    outcome, feedback_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (lead_id, email_id, dumps(context), dumps(decision), dumps(evaluation),
+                 outcome, dumps(feedback), now()),
+            )
+            return cur.lastrowid
+
+    @staticmethod
+    def recent(limit=50):
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM experiences ORDER BY id DESC LIMIT ?", (limit,)
+            ).fetchall()
+            out = []
+            for r in rows_to_dicts(rows):
+                r["context"] = loads(r.pop("context_json"), {})
+                r["decision"] = loads(r.pop("decision_json"), {})
+                r["evaluation"] = loads(r.pop("evaluation_json"), {})
+                r["feedback"] = loads(r.pop("feedback_json"), {})
+                out.append(r)
+            return out
+
+
+class PatternRepository:
+    @staticmethod
+    def get(pattern_key):
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM learned_patterns WHERE pattern_key=?", (pattern_key,)
+            ).fetchone()
+            return row_to_dict(row)
+
+    @staticmethod
+    def get_or_create(pattern_key, description=""):
+        existing = PatternRepository.get(pattern_key)
+        if existing:
+            return existing
+        with get_conn() as conn:
+            conn.execute(
+                """INSERT INTO learned_patterns (pattern_key, description, updated_at)
+                   VALUES (?, ?, ?)""",
+                (pattern_key, description, now()),
+            )
+        return PatternRepository.get(pattern_key)
+
+    @staticmethod
+    def update_score(pattern_key, rating=None, replied=False):
+        pat = PatternRepository.get_or_create(pattern_key)
+        pos = pat["positive_feedback"] + (1 if rating is not None and rating >= 4 else 0)
+        neg = pat["negative_feedback"] + (1 if rating is not None and rating <= 2 else 0)
+        replies = pat["reply_count"] + (1 if replied else 0)
+        samples = pat["sample_count"] + 1
+        smoothing = 2.0
+        score = (pos + 2 * replies + smoothing * 0.5) / (pos + neg + 2 * replies + smoothing)
+        with get_conn() as conn:
+            conn.execute(
+                """UPDATE learned_patterns
+                   SET positive_feedback=?, negative_feedback=?, reply_count=?,
+                       sample_count=?, score=?, updated_at=?
+                   WHERE pattern_key=?""",
+                (pos, neg, replies, samples, score, now(), pattern_key),
+            )
+        return PatternRepository.get(pattern_key)
+
+    @staticmethod
+    def all_for_prefix(prefix):
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM learned_patterns WHERE pattern_key LIKE ? ORDER BY score DESC",
+                (f"{prefix}%",),
+            ).fetchall()
+            return rows_to_dicts(rows)
+
+
+class PreferenceRepository:
+    @staticmethod
+    def upsert(preference_key, description, confidence_delta):
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM learned_preferences WHERE preference_key=?", (preference_key,)
+            ).fetchone()
+            if row:
+                new_conf = max(0.0, min(1.0, row["confidence"] + confidence_delta))
+                conn.execute(
+                    """UPDATE learned_preferences
+                       SET confidence=?, evidence_count=evidence_count+1, updated_at=?
+                       WHERE preference_key=?""",
+                    (new_conf, now(), preference_key),
+                )
+            else:
+                conn.execute(
+                    """INSERT INTO learned_preferences
+                       (preference_key, description, confidence, evidence_count, updated_at)
+                       VALUES (?, ?, ?, 1, ?)""",
+                    (preference_key, description, max(0.0, confidence_delta), now()),
+                )
+
+    @staticmethod
+    def all():
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM learned_preferences ORDER BY confidence DESC"
+            ).fetchall()
+            return rows_to_dicts(rows)
+
+
+class ToolCallRepository:
+    @staticmethod
+    def log(tool_name, parameters, result, status, duration_ms):
+        with get_conn() as conn:
+            conn.execute(
+                """INSERT INTO tool_calls (tool_name, parameters_json, result_json, status, duration_ms, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?)""",
+                (tool_name, dumps(parameters), dumps(result), status, duration_ms, now()),
+            )
+
+
+class MetricsRepository:
+    @staticmethod
+    def record(name, value, context=None):
+        with get_conn() as conn:
+            conn.execute(
+                "INSERT INTO metrics (metric_name, metric_value, context_json, created_at) VALUES (?, ?, ?, ?)",
+                (name, value, dumps(context or {}), now()),
+            )
+
+    @staticmethod
+    def history(name, limit=50):
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM metrics WHERE metric_name=? ORDER BY id DESC LIMIT ?",
+                (name, limit),
+            ).fetchall()
+            return rows_to_dicts(rows)

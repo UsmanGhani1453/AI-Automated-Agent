@@ -1,0 +1,265 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Agent Console</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root{
+    --bg:#0d1117; --panel:#131a24; --panel-2:#182130; --line:#26313f;
+    --text:#dbe4ee; --dim:#7c8ca1; --amber:#f2a541; --cyan:#4fc3d9;
+    --green:#5fbf88; --red:#e0685f; --mono:'IBM Plex Mono','SF Mono',Consolas,monospace;
+    --sans:'IBM Plex Sans',-apple-system,Segoe UI,sans-serif;
+  }
+  @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap');
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{background:var(--bg); color:var(--text); font-family:var(--sans); font-size:14px; line-height:1.5;}
+  header{
+    display:flex; align-items:center; justify-content:space-between;
+    padding:18px 28px; border-bottom:1px solid var(--line); background:var(--panel);
+  }
+  .brand{display:flex; align-items:baseline; gap:10px;}
+  .brand .dot{width:8px; height:8px; border-radius:50%; background:var(--green); box-shadow:0 0 8px var(--green); display:inline-block;}
+  .brand h1{font-size:16px; font-weight:600; letter-spacing:0.02em;}
+  .brand .sub{color:var(--dim); font-family:var(--mono); font-size:12px;}
+  .refresh{font-family:var(--mono); font-size:11px; color:var(--dim);}
+
+  main{padding:24px 28px; max-width:1280px; margin:0 auto;}
+
+  .kpi-row{display:grid; grid-template-columns:repeat(6,1fr); gap:12px; margin-bottom:24px;}
+  .kpi{background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:14px 16px;}
+  .kpi .label{font-family:var(--mono); font-size:10px; color:var(--dim); text-transform:uppercase; letter-spacing:0.06em; margin-bottom:6px;}
+  .kpi .value{font-family:var(--mono); font-size:24px; font-weight:600; color:var(--text);}
+  .kpi .value.amber{color:var(--amber);} .kpi .value.cyan{color:var(--cyan);} .kpi .value.green{color:var(--green);}
+
+  .grid{display:grid; grid-template-columns:1.3fr 1fr; gap:16px; margin-bottom:16px;}
+  .panel{background:var(--panel); border:1px solid var(--line); border-radius:6px; padding:18px 20px;}
+  .panel h2{font-size:13px; font-weight:600; margin-bottom:4px; display:flex; align-items:center; justify-content:space-between;}
+  .panel .desc{color:var(--dim); font-size:11px; margin-bottom:14px; font-family:var(--mono);}
+
+  table{width:100%; border-collapse:collapse; font-size:12.5px;}
+  th{text-align:left; color:var(--dim); font-weight:500; font-family:var(--mono); font-size:10px; text-transform:uppercase; letter-spacing:0.05em; padding:6px 8px; border-bottom:1px solid var(--line);}
+  td{padding:7px 8px; border-bottom:1px solid var(--line);}
+  tr:last-child td{border-bottom:none;}
+  .score-bar{display:inline-block; height:6px; background:var(--line); border-radius:3px; width:70px; position:relative; vertical-align:middle; margin-right:8px;}
+  .score-bar .fill{position:absolute; top:0; left:0; height:100%; border-radius:3px;}
+  .mono{font-family:var(--mono);}
+  .tag{display:inline-block; padding:2px 7px; border-radius:3px; font-family:var(--mono); font-size:10px; font-weight:500;}
+  .tag.strategy{background:rgba(79,195,217,0.12); color:var(--cyan);}
+  .empty{color:var(--dim); font-family:var(--mono); font-size:12px; padding:20px 0; text-align:center;}
+
+  .stmt-list{list-style:none;}
+  .stmt-list li{padding:8px 0; border-bottom:1px solid var(--line); font-size:12.5px; color:var(--dbe);}
+  .stmt-list li:last-child{border-bottom:none;}
+  .stmt-list li::before{content:"›"; color:var(--amber); margin-right:8px; font-weight:600;}
+
+  .review-item{border:1px solid var(--line); border-radius:6px; padding:14px; margin-bottom:10px; background:var(--panel-2);}
+  .review-item .meta{display:flex; justify-content:space-between; font-family:var(--mono); font-size:11px; color:var(--dim); margin-bottom:8px;}
+  .review-item .body{white-space:pre-wrap; font-size:12.5px; color:var(--text); border-left:2px solid var(--line); padding-left:10px; margin-bottom:10px;}
+  .review-item .actions button{
+    font-family:var(--mono); font-size:11px; padding:5px 12px; border-radius:4px; border:1px solid var(--line);
+    background:transparent; color:var(--text); cursor:pointer; margin-right:6px;
+  }
+  .review-item .actions button.approve{border-color:var(--green); color:var(--green);}
+  .review-item .actions button.reject{border-color:var(--red); color:var(--red);}
+
+  canvas{max-height:220px;}
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand">
+    <span class="dot"></span>
+    <h1>AGENT CONSOLE</h1>
+    <span class="sub">/ self-learning email agent — live state</span>
+  </div>
+  <div class="refresh" id="refresh-indicator">refreshing every 5s</div>
+</header>
+
+<main>
+  <div class="kpi-row" id="kpi-row"></div>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>Quality score trend <span class="desc" style="margin:0;">last 50 emails</span></h2>
+      <canvas id="qualityChart"></canvas>
+    </div>
+    <div class="panel">
+      <h2>Strategy scores</h2>
+      <div class="desc">learned via feedback — Laplace-smoothed, 0.5 = no signal yet</div>
+      <table id="strategy-table"><thead><tr><th>Strategy</th><th>Score</th><th>Samples</th><th>Replies</th></tr></thead><tbody></tbody></table>
+    </div>
+  </div>
+
+  <div class="grid">
+    <div class="panel">
+      <h2>Pending human review</h2>
+      <div class="desc">drafts that need approval or fell below the quality threshold</div>
+      <div id="review-list"></div>
+    </div>
+    <div class="panel">
+      <h2>Learned preferences</h2>
+      <div class="desc">extracted from AI-draft vs. user-edit diffs</div>
+      <ul class="stmt-list" id="pref-list"></ul>
+    </div>
+  </div>
+
+  <div class="panel" style="margin-bottom:16px;">
+    <h2>Semantic memory</h2>
+    <div class="desc">plain-English statements derived fresh from learned_patterns / learned_preferences — never hardcoded</div>
+    <ul class="stmt-list" id="semantic-list"></ul>
+  </div>
+
+  <div class="panel">
+    <h2>Best-performing components</h2>
+    <div class="desc" id="component-desc">top scoring text per slot</div>
+    <div id="component-grid" style="display:grid; grid-template-columns:repeat(3,1fr); gap:14px;"></div>
+  </div>
+</main>
+
+<script>
+const API = ""; // same origin
+
+function scoreColor(s){
+  if (s >= 0.65) return getCss('--green');
+  if (s <= 0.4) return getCss('--red');
+  return getCss('--amber');
+}
+function getCss(v){ return getComputedStyle(document.documentElement).getPropertyValue(v).trim(); }
+
+async function j(path, opts){
+  const r = await fetch(API + path, opts);
+  if (!r.ok) throw new Error(path + " " + r.status);
+  return r.json();
+}
+
+let qualityChart = null;
+
+async function renderKPIs(){
+  const s = await j("/api/summary");
+  const items = [
+    ["Leads", s.total_leads, ""],
+    ["Emails drafted", s.total_emails, ""],
+    ["Sent", s.sent, "green"],
+    ["Pending review", s.pending_review, "amber"],
+    ["Replies", s.replies, "cyan"],
+    ["Avg quality", s.avg_quality_score, "cyan"],
+  ];
+  document.getElementById("kpi-row").innerHTML = items.map(([label, val, cls]) =>
+    `<div class="kpi"><div class="label">${label}</div><div class="value ${cls}">${val}</div></div>`
+  ).join("");
+}
+
+async function renderQualityChart(){
+  const rows = await j("/api/quality-trend?limit=50");
+  const labels = rows.map((r,i) => i+1);
+  const data = rows.map(r => r.quality_score);
+  const ctx = document.getElementById('qualityChart');
+  if (qualityChart) qualityChart.destroy();
+  qualityChart = new Chart(ctx, {
+    type: 'line',
+    data: { labels, datasets: [{
+      data, borderColor: getCss('--cyan'), backgroundColor: 'rgba(79,195,217,0.08)',
+      fill: true, tension: 0.3, pointRadius: 2, borderWidth: 2,
+    }]},
+    options: {
+      plugins:{legend:{display:false}},
+      scales:{
+        y:{min:0,max:1, grid:{color: getCss('--line')}, ticks:{color: getCss('--dim')}},
+        x:{grid:{display:false}, ticks:{color: getCss('--dim'), maxTicksLimit:8}},
+      },
+    }
+  });
+}
+
+async function renderStrategies(){
+  const rows = await j("/api/strategies");
+  const tbody = document.querySelector("#strategy-table tbody");
+  if (!rows.length){ tbody.innerHTML = `<tr><td colspan="4" class="empty">No feedback recorded yet</td></tr>`; return; }
+  tbody.innerHTML = rows.map(r => `
+    <tr>
+      <td><span class="tag strategy">${r.pattern_key.split(':')[1]}</span></td>
+      <td class="mono">
+        <span class="score-bar"><span class="fill" style="width:${r.score*100}%; background:${scoreColor(r.score)}"></span></span>
+        ${r.score.toFixed(2)}
+      </td>
+      <td class="mono">${r.sample_count}</td>
+      <td class="mono">${r.reply_count}</td>
+    </tr>`).join("");
+}
+
+async function renderPending(){
+  const rows = await j("/api/pending-review");
+  const el = document.getElementById("review-list");
+  if (!rows.length){ el.innerHTML = `<div class="empty">Nothing waiting on review</div>`; return; }
+  el.innerHTML = rows.map(r => `
+    <div class="review-item">
+      <div class="meta"><span>${r.officer || r.company || 'lead'} · ${r.location || ''}</span><span>quality ${r.quality_score.toFixed(2)}</span></div>
+      <div class="body">${escapeHtml(r.body)}</div>
+      <div class="actions">
+        <button class="approve" onclick="act(${r.id}, 'approve')">Approve</button>
+        <button class="reject" onclick="act(${r.id}, 'reject')">Reject</button>
+      </div>
+    </div>`).join("");
+}
+
+async function act(emailId, action){
+  const rating = action === 'approve' ? 5 : 2;
+  await fetch(`/api/emails/${emailId}/feedback?action=${action}&rating=${rating}`, {method:'POST'});
+  renderPending();
+  renderSummaryOnly();
+}
+async function renderSummaryOnly(){ await renderKPIs(); }
+
+async function renderPreferences(){
+  const rows = await j("/api/preferences");
+  const el = document.getElementById("pref-list");
+  const shown = rows.filter(r => r.evidence_count >= 1);
+  el.innerHTML = shown.length ? shown.map(r =>
+    `<li>${r.description} <span class="mono" style="color:var(--dim)">(confidence ${r.confidence.toFixed(2)}, ${r.evidence_count} obs.)</span></li>`
+  ).join("") : `<div class="empty">No edits observed yet</div>`;
+}
+
+async function renderSemantic(){
+  const { statements } = await j("/api/semantic-statements");
+  const el = document.getElementById("semantic-list");
+  el.innerHTML = statements.length ? statements.map(s => `<li>${s}</li>`).join("")
+    : `<div class="empty">Not enough samples yet to derive statements</div>`;
+}
+
+async function renderComponents(){
+  const types = await j("/api/component-types");
+  const grid = document.getElementById("component-grid");
+  if (!types.length){ grid.innerHTML = `<div class="empty">No components seeded yet</div>`; return; }
+  const blocks = await Promise.all(types.map(async t => {
+    const rows = await j(`/api/components/${t}`);
+    const best = rows[0];
+    return `<div>
+      <div class="mono" style="color:var(--dim); font-size:11px; text-transform:uppercase; margin-bottom:6px;">${t}</div>
+      <div style="font-size:12px; border-left:2px solid var(--cyan); padding-left:8px;">${best ? escapeHtml(best.text.slice(0,80)) : '—'}</div>
+      <div class="mono" style="font-size:11px; color:var(--dim); margin-top:4px;">score ${best ? best.positive_score.toFixed(2) : '—'} · ${best ? best.uses : 0} uses</div>
+    </div>`;
+  }));
+  grid.innerHTML = blocks.join("");
+}
+
+function escapeHtml(s){
+  return (s||"").replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+}
+
+async function refreshAll(){
+  try {
+    await Promise.all([
+      renderKPIs(), renderQualityChart(), renderStrategies(),
+      renderPending(), renderPreferences(), renderSemantic(), renderComponents(),
+    ]);
+  } catch(e){ console.error(e); }
+}
+
+refreshAll();
+setInterval(refreshAll, 5000);
+</script>
+</body>
+</html>
