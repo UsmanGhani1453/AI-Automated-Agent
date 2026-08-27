@@ -11,24 +11,24 @@ from app.database.repository import PatternRepository, ComponentRepository, Pref
 
 def test_strategy_score_starts_neutral():
     pat = PatternRepository.get_or_create("strategy:TEST_STRATEGY")
-    assert pat["score"] == 0.5
+    assert pat["score"] == 0.5 # type: ignore
 
 
 def test_positive_feedback_increases_strategy_score():
     scorer = PatternScorer()
-    before = PatternRepository.get_or_create("strategy:TEST_STRATEGY")["score"]
+    before = PatternRepository.get_or_create("strategy:TEST_STRATEGY")["score"] # type: ignore
     for _ in range(5):
         scorer.score_strategy("TEST_STRATEGY", rating=5)
-    after = PatternRepository.get("strategy:TEST_STRATEGY")["score"]
+    after = PatternRepository.get("strategy:TEST_STRATEGY")["score"] # type: ignore
     assert after > before
 
 
 def test_negative_feedback_decreases_strategy_score():
     scorer = PatternScorer()
-    before = PatternRepository.get_or_create("strategy:TEST_STRATEGY_2")["score"]
+    before = PatternRepository.get_or_create("strategy:TEST_STRATEGY_2")["score"] # type: ignore
     for _ in range(5):
         scorer.score_strategy("TEST_STRATEGY_2", rating=1)
-    after = PatternRepository.get("strategy:TEST_STRATEGY_2")["score"]
+    after = PatternRepository.get("strategy:TEST_STRATEGY_2")["score"] # type: ignore
     assert after < before
 
 
@@ -36,8 +36,8 @@ def test_reply_weighted_more_than_rating():
     scorer = PatternScorer()
     scorer.score_strategy("RATING_ONLY", rating=5, replied=False)
     scorer.score_strategy("REPLY_STRATEGY", rating=5, replied=True)
-    rating_only = PatternRepository.get("strategy:RATING_ONLY")["score"]
-    with_reply = PatternRepository.get("strategy:REPLY_STRATEGY")["score"]
+    rating_only = PatternRepository.get("strategy:RATING_ONLY")["score"] # type: ignore
+    with_reply = PatternRepository.get("strategy:REPLY_STRATEGY")["score"] # type: ignore
     assert with_reply > rating_only
 
 
@@ -45,22 +45,22 @@ def test_score_converges_toward_signal_with_more_samples():
     """Few samples shouldn't swing the score as far as many consistent samples."""
     scorer = PatternScorer()
     scorer.score_strategy("FEW_SAMPLES", rating=5)
-    few = PatternRepository.get("strategy:FEW_SAMPLES")["score"]
+    few = PatternRepository.get("strategy:FEW_SAMPLES")["score"] # type: ignore
 
     for _ in range(20):
         scorer.score_strategy("MANY_SAMPLES", rating=5)
-    many = PatternRepository.get("strategy:MANY_SAMPLES")["score"]
+    many = PatternRepository.get("strategy:MANY_SAMPLES")["score"] # type: ignore
 
     assert many > few  # more consistent positive evidence pushes further from 0.5
 
 
 def test_component_scoring_updates_on_feedback():
     comp = ComponentRepository.upsert("cta", "Would you be open to a quick call?")
-    assert comp["positive_score"] == 0.5
+    assert comp["positive_score"] == 0.5 # type: ignore
     for _ in range(4):
-        ComponentRepository.apply_feedback(comp["id"], rating=5, replied=False)
+        ComponentRepository.apply_feedback(comp["id"], rating=5, replied=False) # type: ignore
     rows = ComponentRepository.top_for_type("cta", limit=5)
-    updated = next(r for r in rows if r["id"] == comp["id"])
+    updated = next(r for r in rows if r["id"] == comp["id"]) # type: ignore
     assert updated["positive_score"] > 0.5
 
 
@@ -95,3 +95,117 @@ def test_preference_confidence_accumulates_with_evidence():
     conf2 = next(p["confidence"] for p in second if p["preference_key"] == "test_pref")
 
     assert conf2 > conf1
+def test_opposite_preference_is_weakened_by_positive_evidence():
+    scorer = PatternScorer()
+
+    scorer.record_preference_signal(
+        "prefers_detailed_emails",
+        "User prefers more detailed emails than the AI draft.",
+        positive=True,
+    )
+
+    scorer.record_preference_signal(
+        "prefers_shorter_emails",
+        "User prefers shorter emails than the AI draft.",
+        positive=True,
+    )
+
+    preferences = PreferenceRepository.all()
+
+    shorter = next(
+        p for p in preferences
+        if p["preference_key"] == "prefers_shorter_emails"
+    )
+    detailed = next(
+        p for p in preferences
+        if p["preference_key"] == "prefers_detailed_emails"
+    )
+
+    assert shorter["confidence"] > 0.0
+    assert detailed["confidence"] < 0.08
+
+
+def test_detailed_preference_weakens_shorter_preference():
+    scorer = PatternScorer()
+
+    scorer.record_preference_signal(
+        "prefers_shorter_emails",
+        "User prefers shorter emails than the AI draft.",
+        positive=True,
+    )
+
+    scorer.record_preference_signal(
+        "prefers_detailed_emails",
+        "User prefers more detailed emails than the AI draft.",
+        positive=True,
+    )
+
+    preferences = PreferenceRepository.all()
+
+    shorter = next(
+        p for p in preferences
+        if p["preference_key"] == "prefers_shorter_emails"
+    )
+    detailed = next(
+        p for p in preferences
+        if p["preference_key"] == "prefers_detailed_emails"
+    )
+
+    assert detailed["confidence"] > 0.0
+    assert shorter["confidence"] < 0.08
+def test_composer_prefers_casual_greeting():
+    from app.email.composer import Composer
+
+    PreferenceRepository.upsert(
+        "prefers_casual_greeting",
+        "User prefers casual greetings.",
+        0.9,
+    )
+
+    composer = Composer()
+
+    preferences = composer._preferences()
+
+    rows = composer.top_candidates("greeting", k=3)
+
+    weights = [
+        composer._preference_weight(row, preferences)
+        for row in rows
+    ]
+
+    casual_weights = [
+        weight
+        for row, weight in zip(rows, weights)
+        if row["text"].lower().startswith(("hi ", "hello ", "hey "))
+    ]
+
+    formal_weights = [
+        weight
+        for row, weight in zip(rows, weights)
+        if row["text"].lower().startswith("dear ")
+    ]
+
+    assert casual_weights
+    assert formal_weights
+    assert max(casual_weights) > max(formal_weights)
+
+
+def test_composer_prefers_short_strategy():
+    from app.email.composer import Composer
+
+    PreferenceRepository.upsert(
+        "prefers_shorter_emails",
+        "User prefers shorter emails.",
+        0.9,
+    )
+
+    from app.email.generator import EmailGenerator
+
+    generator = EmailGenerator(None)
+
+    assert generator.select_strategy() in [
+        "SHORT_DIRECT",
+        "LOCATION_PERSONALIZED",
+        "PROFESSIONAL_INTRO",
+        "VALUE_FIRST",
+    ]

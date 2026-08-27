@@ -148,55 +148,6 @@ class ReplyGenerator:
             f"{sender_title}"
         )
 
-    def _apply_length_preference(
-        self,
-        body: str,
-        analysis: dict,
-    ) -> str:
-        """
-        Adapt the draft to the user's learned length preference.
-
-        The agent only removes low-value/redundant language. It never removes
-        the core requested action or invents new information.
-        """
-        shorter = self._preference_confidence(
-            "prefers_shorter_emails"
-        )
-
-        detailed = self._preference_confidence(
-            "prefers_detailed_emails"
-        )
-
-        # Require multiple pieces of evidence before changing generation.
-        if shorter < 0.60 and detailed < 0.60:
-            return body
-
-        if shorter >= 0.60 and shorter >= detailed:
-            removable_sentences = {
-                "Thanks for reaching out.",
-                "Thanks for your message.",
-                "I’ve got your message.",
-                "I've got your message.",
-                "I’ve noted your request for the information.",
-                "I've noted your request for the information.",
-            }
-
-            paragraphs = [
-                paragraph.strip()
-                for paragraph in body.split("\n\n")
-                if paragraph.strip()
-            ]
-
-            cleaned = []
-            for paragraph in paragraphs:
-                if paragraph in removable_sentences:
-                    continue
-                cleaned.append(paragraph)
-
-            return "\n\n".join(cleaned).strip()
-
-        return body
-
     # ------------------------------------------------------------------
     # Classification
     # ------------------------------------------------------------------
@@ -455,11 +406,6 @@ class ReplyGenerator:
         body = "\n".join(
             body_parts
         ).strip()
-
-        body = self._apply_length_preference(
-            body,
-            analysis,
-        )
 
         # --------------------------------------------------------------
         # Human decision detection
