@@ -1,95 +1,495 @@
-"""Safe, model-free inbox classification and draft generation."""
+"""
+Context-aware reply generation for the adaptive email agent.
+
+The generator is intentionally model-free for now. It combines:
+- deterministic email understanding
+- conversation context
+- learned personal writing preferences
+- explicit uncertainty handling
+
+No facts are invented.
+"""
+
 from __future__ import annotations
 
 import re
 from email.utils import parseaddr
 
+from app.database.repository import PreferenceRepository
+from app.email.understanding import EmailUnderstanding
+
 
 class ReplyGenerator:
-    AUTOMATED_SENDERS = {
-        "no-reply", "noreply", "no_reply", "donotreply", "do-not-reply",
-        "mailer-daemon", "postmaster"
-    }
-    AUTOMATED_DOMAINS = {"accounts.google.com", "google.com"}
-    SECURITY_TERMS = {
-        "security alert", "app password", "password changed", "recovery email",
-        "recovery phone", "new sign-in", "suspicious activity", "verification code",
-        "two-step verification", "2-step verification"
-    }
     PROMO_TERMS = {
-        "unsubscribe", "newsletter", "prize pool", "limited time", "special offer",
-        "sale", "discount", "deal", "promotion", "marketing"
+        "unsubscribe",
+        "newsletter",
+        "prize pool",
+        "limited time",
+        "special offer",
+        "sale",
+        "discount",
+        "deal",
+        "promotion",
+        "marketing",
     }
 
-    def __init__(self, sender_info: dict | None = None) -> None:
+    def __init__(self, sender_info=None):
         self.sender_info = sender_info or {}
+        self.understanding = EmailUnderstanding()
+        self.preferences = PreferenceRepository
+
+    # ------------------------------------------------------------------
+    # Basic helpers
+    # ------------------------------------------------------------------
 
     @staticmethod
     def _first_name(from_header: str) -> str:
         name, address = parseaddr(from_header or "")
+
         if name:
             return name.split()[0]
+
         if address and "@" in address:
-            return address.split("@", 1)[0].replace(".", " ").split()[0].title()
+            return (
+                address.split("@", 1)[0]
+                .replace(".", " ")
+                .split()[0]
+                .title()
+            )
+
         return "there"
 
     @staticmethod
     def _clean_subject(subject: str) -> str:
-        return re.sub(r"^(?:(?:re|fw|fwd):\s*)+", "", subject or "", flags=re.I).strip()
+        return re.sub(
+            r"^(?:(?:re|fw|fwd):\s*)+",
+            "",
+            subject or "",
+            flags=re.I,
+        ).strip()
 
-    @staticmethod
-    def _sender_localpart(address: str) -> str:
-        return (address or "").split("@", 1)[0].lower().strip()
+    # ------------------------------------------------------------------
+    # Learned preferences
+    # ------------------------------------------------------------------
 
-    def classify(self, message: dict) -> tuple[str, str]:
-        subject = (message.get("subject") or "").lower()
-        body = (message.get("body") or "").lower()
-        sender = (message.get("from_email") or parseaddr(message.get("from", ""))[1]).lower()
-        local = self._sender_localpart(sender)
-        domain = sender.rsplit("@", 1)[-1] if "@" in sender else ""
+    def _preference_confidence(self, key: str) -> float:
+        """
+        Return the learned confidence for a preference.
 
-        if local in self.AUTOMATED_SENDERS:
-            return "automated", "sender address indicates automated mail"
-        if domain in self.AUTOMATED_DOMAINS and any(term in subject for term in self.SECURITY_TERMS):
-            return "security", "account/security notification"
-        if any(term in subject or term in body[:4000] for term in self.SECURITY_TERMS):
-            return "security", "security/account notification"
-        if any(term in subject for term in self.PROMO_TERMS) or "unsubscribe" in body:
-            return "promotional", "newsletter or promotional content"
-        if not (message.get("body") or "").strip():
-            return "empty", "no readable message body"
-        return "actionable", "likely human/actionable message"
+        Confidence is stored in SQLite and ranges from 0.0 to 1.0.
+        """
+        rows = self.preferences.all()
 
-    def draft(self, message: dict) -> dict:
+        for row in rows:
+            if row["preference_key"] == key:
+                return float(row["confidence"])
+
+        return 0.0
+
+    def _choose_greeting(self, first_name: str) -> str:
+        """
+        Choose a greeting based on learned user preferences.
+        """
+        casual = self._preference_confidence(
+            "prefers_casual_greeting"
+        )
+
+        formal = self._preference_confidence(
+            "prefers_formal_greeting"
+        )
+
+        direct = self._preference_confidence(
+            "prefers_direct_opening"
+        )
+
+        # Strong evidence that the user prefers no greeting.
+        if direct >= 0.65:
+            return ""
+
+        # Stronger formal preference.
+        if formal > casual and formal >= 0.60:
+            return f"Hello {first_name},"
+
+        # Default.
+        return f"Hi {first_name},"
+
+    def _choose_signoff(self) -> str:
+        """
+        Choose a sign-off based on learned preferences.
+        """
+        formal = self._preference_confidence(
+            "prefers_formal_signoff"
+        )
+
+        casual = self._preference_confidence(
+            "prefers_casual_signoff"
+        )
+
+        sender_name = self.sender_info.get(
+            "sender_name",
+            "",
+        )
+
+        sender_title = self.sender_info.get(
+            "sender_title",
+            "",
+        )
+
+        if formal > casual and formal >= 0.60:
+            return (
+                "Best regards,\n"
+                f"{sender_name}\n"
+                f"{sender_title}"
+            )
+
+        return (
+            "Thanks,\n"
+            f"{sender_name}\n"
+            f"{sender_title}"
+        )
+
+    def _apply_length_preference(
+        self,
+        body: str,
+        analysis: dict,
+    ) -> str:
+        """
+        Adapt the draft to the user's learned length preference.
+
+        The agent only removes low-value/redundant language. It never removes
+        the core requested action or invents new information.
+        """
+        shorter = self._preference_confidence(
+            "prefers_shorter_emails"
+        )
+
+        detailed = self._preference_confidence(
+            "prefers_detailed_emails"
+        )
+
+        # Require multiple pieces of evidence before changing generation.
+        if shorter < 0.60 and detailed < 0.60:
+            return body
+
+        if shorter >= 0.60 and shorter >= detailed:
+            removable_sentences = {
+                "Thanks for reaching out.",
+                "Thanks for your message.",
+                "I’ve got your message.",
+                "I've got your message.",
+                "I’ve noted your request for the information.",
+                "I've noted your request for the information.",
+            }
+
+            paragraphs = [
+                paragraph.strip()
+                for paragraph in body.split("\n\n")
+                if paragraph.strip()
+            ]
+
+            cleaned = []
+            for paragraph in paragraphs:
+                if paragraph in removable_sentences:
+                    continue
+                cleaned.append(paragraph)
+
+            return "\n\n".join(cleaned).strip()
+
+        return body
+
+    # ------------------------------------------------------------------
+    # Classification
+    # ------------------------------------------------------------------
+
+    def classify(self, message: dict):
+        """
+        Classify an incoming email into a safe high-level category.
+        """
+        analysis = self.understanding.analyze(message)
+
+        if analysis["category"] == "security":
+            return (
+                "security",
+                "security/account notification",
+            )
+
+        if analysis["category"] == "automated":
+            return (
+                "automated",
+                "sender address indicates automated mail",
+            )
+
+        subject = (
+            message.get("subject") or ""
+        ).lower()
+
+        body = (
+            message.get("body") or ""
+        ).lower()
+
+        if (
+            any(
+                term in subject
+                for term in self.PROMO_TERMS
+            )
+            or "unsubscribe" in body
+        ):
+            return (
+                "promotional",
+                "newsletter or promotional content",
+            )
+
+        if analysis["category"] == "empty":
+            return (
+                "empty",
+                "no readable message body",
+            )
+
+        return (
+            "actionable",
+            "likely human/actionable message",
+        )
+
+    # ------------------------------------------------------------------
+    # Intent-specific wording
+    # ------------------------------------------------------------------
+
+    def _opening_for_intent(self, analysis: dict) -> str:
+        intent = analysis["intent"]
+
+        if intent == "meeting_request":
+            return (
+                "Thanks for reaching out. "
+                "I’ve noted your request for a quick call."
+            )
+
+        if intent == "information_request":
+            return (
+                "Thanks for reaching out. "
+                "I’ve noted your request for the information."
+            )
+
+        if intent == "approval_request":
+            return (
+                "Thanks for sending this over. "
+                "I’ve reviewed the request."
+            )
+
+        if intent == "follow_up":
+            return (
+                "Thanks for following up. "
+                "I’ve got your message."
+            )
+
+        if intent == "question":
+            return (
+                "Thanks for your message. "
+                "I understand your question."
+            )
+
+        return "Thanks for reaching out."
+
+    def _next_step_for_intent(
+        self,
+        analysis: dict,
+    ) -> str:
+        """
+        Generate the next-step sentence without inventing
+        facts that the agent does not know.
+        """
+        intent = analysis["intent"]
+
+        if intent == "meeting_request":
+            time_reference = analysis.get(
+                "time_reference"
+            )
+
+            if time_reference:
+                return (
+                    f"I’ve noted the {time_reference} timing. "
+                    "I’ll confirm the exact availability "
+                    "before sending a final confirmation."
+                )
+
+            return (
+                "I’ll confirm the timing before sending "
+                "a final confirmation."
+            )
+
+        if intent == "information_request":
+            return (
+                "I’ll review the request and send "
+                "the relevant details shortly."
+            )
+
+        if intent == "approval_request":
+            return (
+                "I’ll review the request and confirm "
+                "the approval status shortly."
+            )
+
+        if intent == "follow_up":
+            return (
+                "I’ll follow up with the next steps shortly."
+            )
+
+        if analysis["urgency"] == "high":
+            return (
+                "I’ll prioritize this and get back "
+                "to you shortly."
+            )
+
+        if intent == "question":
+            return (
+                "I’ll review the question and get back "
+                "to you with the relevant details."
+            )
+
+        return (
+            "I’ll review this and get back to you "
+            "with the next steps."
+        )
+
+    # ------------------------------------------------------------------
+    # Draft generation
+    # ------------------------------------------------------------------
+
+    def draft(
+        self,
+        message: dict,
+        conversation_context=None,
+    ) -> dict:
+        """
+        Generate a contextual draft.
+
+        The function never assumes unavailable facts such as:
+        - calendar availability
+        - pricing
+        - approval status
+        - whether the user agrees with a request
+        """
         category, reason = self.classify(message)
-        subject = self._clean_subject(message.get("subject", ""))
+
+        subject = self._clean_subject(
+            message.get("subject", "")
+        )
+
+        analysis = self.understanding.analyze(
+            message
+        )
+
+        # --------------------------------------------------------------
+        # Non-actionable mail
+        # --------------------------------------------------------------
         if category != "actionable":
-            return {"category": category, "reason": reason, "subject": subject, "body": "", "should_reply": False}
+            return {
+                "category": category,
+                "reason": reason,
+                "subject": subject,
+                "body": "",
+                "should_reply": False,
+                "analysis": analysis,
+                "requires_human_decision": False,
+            }
 
-        first_name = self._first_name(message.get("from", ""))
-        body = " ".join((message.get("body") or "").split())
-        excerpt = body[:420].strip()
-        if len(body) > 420:
-            excerpt += "..."
-        sender_name = self.sender_info.get("sender_name", "")
-        sender_title = self.sender_info.get("sender_title", "")
+        # --------------------------------------------------------------
+        # Conversation context
+        # --------------------------------------------------------------
+        context = conversation_context or {}
 
-        reply_body = (
-            f"Hi {first_name},\n\n"
-            f"Thanks for your message regarding {subject or 'this'}. "
-            f"I’ve reviewed the details you sent."
+        messages = context.get(
+            "messages",
+            [],
         )
-        if excerpt:
-            reply_body += f"\n\nYou mentioned: {excerpt}"
-        reply_body += (
-            "\n\nI’ll review this and get back to you with the relevant details."
-            "\n\nBest regards,"
-            f"\n{sender_name}\n{sender_title}"
+
+        prior_count = max(
+            0,
+            len(messages) - 1,
         )
+
+        # --------------------------------------------------------------
+        # Sender identity
+        # --------------------------------------------------------------
+        first_name = self._first_name(
+            message.get("from", "")
+        )
+
+        # --------------------------------------------------------------
+        # Intent-specific content
+        # --------------------------------------------------------------
+        opening = self._opening_for_intent(
+            analysis
+        )
+
+        next_step = self._next_step_for_intent(
+            analysis
+        )
+
+        # --------------------------------------------------------------
+        # Greeting
+        # --------------------------------------------------------------
+        greeting = self._choose_greeting(
+            first_name
+        )
+
+        body_parts = []
+
+        if greeting:
+            body_parts.extend(
+                [
+                    greeting,
+                    "",
+                ]
+            )
+
+        body_parts.extend(
+            [
+                opening,
+                "",
+                next_step,
+                "",
+                self._choose_signoff(),
+            ]
+        )
+
+        body = "\n".join(
+            body_parts
+        ).strip()
+
+        body = self._apply_length_preference(
+            body,
+            analysis,
+        )
+
+        # --------------------------------------------------------------
+        # Human decision detection
+        # --------------------------------------------------------------
+        requires_human_decision = analysis[
+            "intent"
+        ] in {
+            "meeting_request",
+            "approval_request",
+        }
+
         return {
             "category": category,
             "reason": reason,
-            "subject": f"Re: {subject}" if subject else "Re:",
-            "body": reply_body,
+            "subject": (
+                f"Re: {subject}"
+                if subject
+                else "Re:"
+            ),
+            "body": body,
             "should_reply": True,
+            "analysis": analysis,
+            "conversation": {
+                "prior_message_count": prior_count,
+                "thread_key": context.get(
+                    "thread_key"
+                ),
+            },
+            "requires_human_decision": (
+                requires_human_decision
+            ),
         }
+        
