@@ -1,8 +1,6 @@
-cat > .gitignore <<'EOF'
 .env
 venv/
 __pycache__/
 *.pyc
 agent.db
 agent.db-*
-EOF
