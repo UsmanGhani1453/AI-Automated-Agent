@@ -193,23 +193,163 @@ async function renderStrategies(){
 async function renderPending(){
   const rows = await j("/api/pending-review");
   const el = document.getElementById("review-list");
-  if (!rows.length){ el.innerHTML = `<div class="empty">Nothing waiting on review</div>`; return; }
+
+  if (!rows.length){
+    el.innerHTML = `
+      <div class="empty">
+        Nothing waiting on review
+      </div>`;
+    return;
+  }
+
   el.innerHTML = rows.map(r => `
     <div class="review-item">
-      <div class="meta"><span>${r.officer || r.company || 'lead'} · ${r.location || ''}</span><span>quality ${r.quality_score.toFixed(2)}</span></div>
-      <div class="body">${escapeHtml(r.body)}</div>
-      <div class="actions">
-        <button class="approve" onclick="act(${r.id}, 'approve')">Approve</button>
-        <button class="reject" onclick="act(${r.id}, 'reject')">Reject</button>
+      <div class="meta">
+        <span>
+          ${escapeHtml(
+            r.officer ||
+            r.company ||
+            r.lead_email ||
+            "lead"
+          )}
+          ·
+          ${escapeHtml(r.location || "")}
+        </span>
+
+        <span>
+          quality ${Number(
+            r.quality_score || 0
+          ).toFixed(2)}
+        </span>
       </div>
-    </div>`).join("");
+
+      <textarea
+        id="draft-${r.id}"
+        style="
+          width:100%;
+          min-height:180px;
+          resize:vertical;
+          background:var(--bg);
+          color:var(--text);
+          border:1px solid var(--line);
+          border-radius:4px;
+          padding:10px;
+          font:12px var(--sans);
+          line-height:1.5;
+          margin-bottom:10px;
+        "
+      >${escapeHtml(r.user_edited_body || r.body || "")}</textarea>
+
+      <div class="actions">
+        <button
+          class="approve"
+          onclick="saveEdit(${r.id})"
+        >
+          Save + Learn
+        </button>
+
+        <button
+          class="approve"
+          onclick="approveDraft(${r.id})"
+        >
+          Approve
+        </button>
+
+        <button
+          class="reject"
+          onclick="rejectDraft(${r.id})"
+        >
+          Reject
+        </button>
+      </div>
+    </div>
+  `).join("");
+}
+async function saveEdit(emailId){
+  const textarea =
+    document.getElementById(
+      `draft-${emailId}`
+    );
+
+  const body =
+    textarea ? textarea.value.trim() : "";
+
+  if (!body){
+    alert("Draft cannot be empty.");
+    return;
+  }
+
+  const response = await fetch(
+    `/api/emails/${emailId}/edit`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        body: body
+      })
+    }
+  );
+
+  if (!response.ok){
+    const text =
+      await response.text();
+
+    alert(
+      `Could not save edit: ${text}`
+    );
+
+    return;
+  }
+
+  await renderPending();
+  await renderPreferences();
+  await renderSemantic();
+
+  alert(
+    "Edit saved. The agent learned from your changes."
+  );
 }
 
-async function act(emailId, action){
-  const rating = action === 'approve' ? 5 : 2;
-  await fetch(`/api/emails/${emailId}/feedback?action=${action}&rating=${rating}`, {method:'POST'});
-  renderPending();
-  renderSummaryOnly();
+
+async function approveDraft(emailId){
+  await fetch(
+    `/api/emails/${emailId}/feedback`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        action: "approve",
+        rating: 5
+      })
+    }
+  );
+
+  await renderPending();
+  await renderKPIs();
+}
+
+
+async function rejectDraft(emailId){
+  await fetch(
+    `/api/emails/${emailId}/feedback`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        action: "reject",
+        rating: 2
+      })
+    }
+  );
+
+  await renderPending();
+  await renderKPIs();
 }
 async function renderSummaryOnly(){ await renderKPIs(); }
 

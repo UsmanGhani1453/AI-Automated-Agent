@@ -101,6 +101,43 @@ CREATE TABLE IF NOT EXISTS emails (
     created_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS inbox_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mailbox_id TEXT UNIQUE NOT NULL,
+    message_id TEXT,
+    thread_key TEXT NOT NULL,
+    from_name TEXT,
+    from_email TEXT,
+    to_header TEXT,
+    subject TEXT,
+    sent_at TEXT,
+    body TEXT NOT NULL,
+    category TEXT,
+    intent TEXT,
+    urgency TEXT,
+    requested_action TEXT,
+    should_reply INTEGER DEFAULT 0,
+    processed INTEGER DEFAULT 0,
+    draft_email_id INTEGER,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_inbox_thread_key ON inbox_messages(thread_key);
+CREATE INDEX IF NOT EXISTS idx_inbox_from_email ON inbox_messages(from_email);
+
+CREATE TABLE IF NOT EXISTS conversation_profiles (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    thread_key TEXT UNIQUE NOT NULL,
+    participant_email TEXT,
+    participant_name TEXT,
+    subject TEXT,
+    last_message_at TEXT,
+    message_count INTEGER DEFAULT 0,
+    summary_json TEXT,
+    updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS email_components (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     component_type TEXT,              -- greeting, opening, value_prop, service, cta, signature
@@ -194,6 +231,7 @@ def now() -> str:
 def get_conn():
     conn = sqlite3.connect(DB_PATH, timeout=10)
     conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA busy_timeout=10000;")
     conn.execute("PRAGMA journal_mode=WAL;")
     conn.execute("PRAGMA foreign_keys=ON;")
     try:

@@ -85,6 +85,112 @@ class SuppressionRepository:
             )
 
 
+class InboxMessageRepository:
+    @staticmethod
+    def upsert(message, analysis=None):
+        analysis = analysis or {}
+        mailbox_id = str(message["id"])
+        thread_key = message.get("thread_key") or message.get("message_id") or mailbox_id
+        with get_conn() as conn:
+            conn.execute(
+                """INSERT INTO inbox_messages
+                   (mailbox_id, message_id, thread_key, from_name, from_email,
+                    to_header, subject, sent_at, body, category, intent, urgency,
+                    requested_action, should_reply, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(mailbox_id) DO UPDATE SET
+                    message_id=excluded.message_id, thread_key=excluded.thread_key,
+                    from_name=excluded.from_name, from_email=excluded.from_email,
+                    to_header=excluded.to_header, subject=excluded.subject,
+                    sent_at=excluded.sent_at, body=excluded.body,
+                    category=excluded.category, intent=excluded.intent,
+                    urgency=excluded.urgency, requested_action=excluded.requested_action,
+                    should_reply=excluded.should_reply, updated_at=excluded.updated_at""",
+                (
+                    mailbox_id, message.get("message_id", ""), thread_key,
+                    message.get("from_name", ""), message.get("from_email", ""),
+                    message.get("to", ""), message.get("subject", ""),
+                    message.get("date", ""), message.get("body", ""),
+                    analysis.get("category", ""), analysis.get("intent", ""),
+                    analysis.get("urgency", ""), analysis.get("requested_action", ""),
+                    int(bool(analysis.get("should_reply"))), now(), now(),
+                ),
+            )
+            row = conn.execute(
+                "SELECT * FROM inbox_messages WHERE mailbox_id=?", (mailbox_id,)
+            ).fetchone()
+            return row_to_dict(row)
+
+    @staticmethod
+    def mark_processed(mailbox_id, draft_email_id=None):
+        with get_conn() as conn:
+            conn.execute(
+                """UPDATE inbox_messages
+                   SET processed=1, draft_email_id=?, updated_at=?
+                   WHERE mailbox_id=?""",
+                (draft_email_id, now(), str(mailbox_id)),
+            )
+
+    @staticmethod
+    def by_thread(thread_key, limit=20):
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM inbox_messages WHERE thread_key=? ORDER BY id ASC LIMIT ?",
+                (thread_key, limit),
+            ).fetchall()
+            return rows_to_dicts(rows)
+
+    @staticmethod
+    def recent_for_sender(from_email, limit=20):
+        with get_conn() as conn:
+            rows = conn.execute(
+                """SELECT * FROM inbox_messages
+                   WHERE lower(from_email)=lower(?) ORDER BY id DESC LIMIT ?""",
+                (from_email, limit),
+            ).fetchall()
+            return rows_to_dicts(rows)
+
+
+class ConversationProfileRepository:
+    @staticmethod
+    def upsert(thread_key, participant_email, participant_name, subject, message_count, summary):
+        with get_conn() as conn:
+            conn.execute(
+                """INSERT INTO conversation_profiles
+                   (thread_key, participant_email, participant_name, subject,
+                    last_message_at, message_count, summary_json, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                   ON CONFLICT(thread_key) DO UPDATE SET
+                    participant_email=excluded.participant_email,
+                    participant_name=excluded.participant_name,
+                    subject=excluded.subject,
+                    last_message_at=excluded.last_message_at,
+                    message_count=excluded.message_count,
+                    summary_json=excluded.summary_json,
+                    updated_at=excluded.updated_at""",
+                (thread_key, participant_email, participant_name, subject,
+                 now(), message_count, dumps(summary), now()),
+            )
+            row = conn.execute(
+                "SELECT * FROM conversation_profiles WHERE thread_key=?", (thread_key,)
+            ).fetchone()
+            result = row_to_dict(row)
+            if result:
+                result["summary"] = loads(result.pop("summary_json"), {})
+            return result
+
+    @staticmethod
+    def get(thread_key):
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM conversation_profiles WHERE thread_key=?", (thread_key,)
+            ).fetchone()
+            result = row_to_dict(row)
+            if result:
+                result["summary"] = loads(result.pop("summary_json"), {})
+            return result
+
+
 class EmailRepository:
     @staticmethod
     def create(lead_id, strategy, components, body, quality_score, analyzer_report, version=1):
