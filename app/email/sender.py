@@ -1,9 +1,3 @@
-"""
-EmailSender: thin SMTP wrapper. Credentials are read from environment
-variables ONLY (see .env.example) — never hardcoded, never logged.
-Actual sending is behind a `dry_run` flag so the agent loop can be exercised
-safely without touching a real mailbox.
-"""
 import os
 import smtplib
 from email.mime.text import MIMEText
@@ -11,8 +5,13 @@ from email.mime.multipart import MIMEMultipart
 
 
 class EmailSender:
-    def __init__(self, dry_run=True):
-        self.dry_run = dry_run
+    def __init__(self, dry_run=None):
+        self.dry_run = (
+            os.environ.get("EMAIL_DRY_RUN", "true").lower() == "true"
+            if dry_run is None
+            else dry_run
+        )
+
         self.sender_email = os.environ.get("SENDER_EMAIL")
         self.sender_password = os.environ.get("SENDER_APP_PASSWORD")
         self.smtp_server = os.environ.get("SMTP_SERVER", "smtp.gmail.com")
@@ -20,12 +19,15 @@ class EmailSender:
 
     def send(self, recipient_email, subject, body):
         if self.dry_run:
-            return {"status": "dry_run", "recipient": recipient_email, "subject": subject}
+            return {
+                "status": "dry_run",
+                "recipient": recipient_email,
+                "subject": subject,
+            }
 
         if not self.sender_email or not self.sender_password:
             raise RuntimeError(
-                "SENDER_EMAIL / SENDER_APP_PASSWORD not set. "
-                "Copy .env.example to .env and fill in a rotated Gmail App Password."
+                "SENDER_EMAIL / SENDER_APP_PASSWORD not set."
             )
 
         msg = MIMEMultipart()
@@ -35,10 +37,22 @@ class EmailSender:
         msg.attach(MIMEText(body, "plain"))
 
         server = smtplib.SMTP(self.smtp_server, self.smtp_port)
+
         try:
             server.starttls()
             server.login(self.sender_email, self.sender_password)
-            server.sendmail(self.sender_email, recipient_email, msg.as_string())
-            return {"status": "sent", "recipient": recipient_email}
+
+            server.sendmail(
+                self.sender_email,
+                recipient_email,
+                msg.as_string(),
+            )
+
+            return {
+                "status": "sent",
+                "recipient": recipient_email,
+                "subject": subject,
+            }
+
         finally:
             server.quit()

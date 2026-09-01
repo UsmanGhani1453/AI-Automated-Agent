@@ -1,15 +1,7 @@
-"""
-Composer: builds emails from discrete, independently-scored components
-(greeting / opening / value proposition / service / CTA / signature), per
-the "template + learned composition" and "evolutionary optimization" spec.
-
-Component pools start with a handful of hand-written seed variants (cold
-start needs *something* to try) and their scores adapt via ComponentRepository
-as feedback comes in. New component text can also be registered at runtime
-(e.g. if an NLP provider is plugged in later to generate fresh variants).
-"""
 import random
+
 from app.database.repository import ComponentRepository, PreferenceRepository
+
 
 SEED_COMPONENTS = {
     "greeting": [
@@ -41,6 +33,7 @@ SEED_COMPONENTS = {
         "Thanks,\n{sender_name}\n{sender_title}\n{sender_email}",
     ],
 }
+
 
 STRATEGY_COMPONENT_ORDER = {
     "SHORT_DIRECT": [
@@ -75,25 +68,51 @@ STRATEGY_COMPONENT_ORDER = {
     ],
 }
 
+
 DEFAULT_SENDER = {
     "sender_name": "Natasha Roman",
     "sender_title": "Dispatch Operations Manager",
-    "sender_email": "you@example.com",
+    "sender_email": "natasharoman5667@gmail.com",
 }
 
 
 class Composer:
+
+    def __init__(self, nlp_provider=None):
+        self.nlp_provider = nlp_provider
+
+    # ---------------------------------------------------------------
+    # DATABASE SEEDING
+    # ---------------------------------------------------------------
+
     def ensure_seeded(self):
         for comp_type, variants in SEED_COMPONENTS.items():
             for text in variants:
-                ComponentRepository.upsert(comp_type, text)
+                ComponentRepository.upsert(
+                    comp_type,
+                    text,
+                )
+
+    # ---------------------------------------------------------------
+    # TEMPLATE HELPERS
+    # ---------------------------------------------------------------
 
     def _fill(self, template, lead, sender):
-        ctx = {**DEFAULT_SENDER, **sender, **lead}
+        ctx = {
+            **DEFAULT_SENDER,
+            **sender,
+            **lead,
+        }
+
         try:
             return template.format(**ctx)
         except KeyError:
             return template
+
+    # ---------------------------------------------------------------
+    # PREFERENCES
+    # ---------------------------------------------------------------
+
     def _preferences(self):
         return {
             p["preference_key"]: p["confidence"]
@@ -101,81 +120,88 @@ class Composer:
         }
 
     def _preference_weight(self, row, preferences):
-        """
-        Adjust component selection using learned user preferences.
-
-        Historical component performance remains the primary signal.
-        Preferences only provide a bounded bias.
-        """
         text = row["text"].lower()
         component_type = row["component_type"]
 
-        weight = max(row["positive_score"], 0.05)
+        weight = max(
+            row["positive_score"],
+            0.05,
+        )
 
         if component_type == "greeting":
-            casual = preferences.get("prefers_casual_greeting", 0.0)
-            formal = preferences.get("prefers_formal_greeting", 0.0)
+            casual = preferences.get(
+                "prefers_casual_greeting",
+                0.0,
+            )
 
-            if text.startswith(("hi ", "hello ", "hey ")):
+            formal = preferences.get(
+                "prefers_formal_greeting",
+                0.0,
+            )
+
+            if text.startswith(
+                ("hi ", "hello ", "hey ")
+            ):
                 weight += 0.50 * casual
 
             elif text.startswith("dear "):
                 weight += 0.50 * formal
 
-            if preferences.get("dislikes_formal_greeting", 0.0) > 0:
+            if preferences.get(
+                "dislikes_formal_greeting",
+                0.0,
+            ) > 0:
                 if text.startswith("dear "):
                     weight *= max(
                         0.20,
-                        1.0 - preferences["dislikes_formal_greeting"],
+                        1.0
+                        - preferences[
+                            "dislikes_formal_greeting"
+                        ],
                     )
 
         elif component_type == "signature":
-            casual = preferences.get("prefers_casual_signoff", 0.0)
-            formal = preferences.get("prefers_formal_signoff", 0.0)
+            casual = preferences.get(
+                "prefers_casual_signoff",
+                0.0,
+            )
 
-            if text.startswith(("thanks,", "best,", "cheers,")):
+            formal = preferences.get(
+                "prefers_formal_signoff",
+                0.0,
+            )
+
+            if text.startswith(
+                ("thanks,", "best,", "cheers,")
+            ):
                 weight += 0.50 * casual
 
             elif text.startswith(
-                ("best regards,", "kind regards,", "sincerely,")
+                (
+                    "best regards,",
+                    "kind regards,",
+                    "sincerely,",
+                )
             ):
                 weight += 0.50 * formal
 
-        return max(weight, 0.05)
-    def top_candidates(self, component_type, k=3):
-        rows = ComponentRepository.top_for_type(component_type, limit=max(k, 3))
-        if not rows:
-            self.ensure_seeded()
-            rows = ComponentRepository.top_for_type(component_type, limit=max(k, 3))
-        return rows
+        return max(
+            weight,
+            0.05,
+        )
 
-    def generate_candidates(self, lead, sender=None, n_candidates=3, strategy=None):
-        """
-        Evolutionary-lite: build several candidate emails by combining top-scoring
-        components (with a little randomness so exploration doesn't fully stop
-        once one component pulls ahead), then let the caller score/select.
-        """
-        sender = sender or {}
-        candidates = []
-        pools = {ct: self.top_candidates(ct, k=3) for ct in SEED_COMPONENTS}
-        preferences = self._preferences()
+    # ---------------------------------------------------------------
+    # ADAPTIVE COMPONENT STRUCTURE
+    # ---------------------------------------------------------------
 
-        for _ in range(n_candidates):
-            chosen = {}
-            for comp_type, rows in pools.items():
-                weights = [
-                    self._preference_weight(row, preferences)
-                    for row in rows
-                ]
-
-                chosen[comp_type] = random.choices(
-                    rows,
-                    weights=weights,
-                    k=1,
-                )[0]
-
-            component_order = STRATEGY_COMPONENT_ORDER.get(
-                strategy, # type: ignore
+    def _preferred_component_order(
+        self,
+        strategy,
+        preferences,
+    ):
+        order = list(
+            STRATEGY_COMPONENT_ORDER.get(
+                strategy,
                 [
                     "greeting",
                     "opening",
@@ -184,17 +210,366 @@ class Composer:
                     "cta",
                     "signature",
                 ],
-            ) # type: ignore
+            )
+        )
 
-            body_parts = [
-                self._fill(chosen[component_type]["text"], lead, sender)
-                for component_type in component_order
+        shorter = preferences.get(
+            "prefers_shorter_emails",
+            0.0,
+        )
+
+        detailed = preferences.get(
+            "prefers_detailed_emails",
+            0.0,
+        )
+
+        if (
+            shorter >= 0.30
+            and shorter > detailed
+        ):
+            removable = [
+                "service",
+                "opening",
             ]
-            body = "\n".join([p for p in body_parts if p != "" or True]).strip()
-            # collapse accidental blank-line stacking
-            body = "\n".join(body.splitlines())
 
-            component_ids = {ct: row["id"] for ct, row in chosen.items()}
-            candidates.append({"body": body, "component_ids": component_ids, "components": chosen})
+            for component_type in removable:
+                if (
+                    component_type in order
+                    and len(order) > 4
+                ):
+                    order.remove(
+                        component_type
+                    )
+
+        elif (
+            detailed >= 0.30
+            and detailed > shorter
+        ):
+            order = [
+                "greeting",
+                "opening",
+                "value_prop",
+                "service",
+                "cta",
+                "signature",
+            ]
+
+        return order
+
+    # ---------------------------------------------------------------
+    # LEARNED COMPONENT POOLS
+    # ---------------------------------------------------------------
+
+    def top_candidates(
+        self,
+        component_type,
+        k=3,
+    ):
+        rows = ComponentRepository.top_for_type(
+            component_type,
+            limit=max(k, 3),
+        )
+
+        if not rows:
+            self.ensure_seeded()
+
+            rows = ComponentRepository.top_for_type(
+                component_type,
+                limit=max(k, 3),
+            )
+
+        return rows
+
+    # ---------------------------------------------------------------
+    # TEMPLATE-BASED CANDIDATE
+    # ---------------------------------------------------------------
+
+    def _generate_template_candidate(
+        self,
+        lead,
+        sender,
+        strategy,
+        preferences,
+    ):
+        pools = {
+            ct: self.top_candidates(
+                ct,
+                k=3,
+            )
+            for ct in SEED_COMPONENTS
+        }
+
+        chosen = {}
+
+        for comp_type, rows in pools.items():
+
+            if not rows:
+                continue
+
+            weights = [
+                self._preference_weight(
+                    row,
+                    preferences,
+                )
+                for row in rows
+            ]
+
+            chosen[comp_type] = random.choices(
+                rows,
+                weights=weights,
+                k=1,
+            )[0]
+
+        component_order = (
+            self._preferred_component_order(
+                strategy,
+                preferences,
+            )
+        )
+
+        body_parts = []
+
+        for component_type in component_order:
+
+            row = chosen.get(
+                component_type
+            )
+
+            if not row:
+                continue
+
+            text = self._fill(
+                row["text"],
+                lead,
+                sender,
+            )
+
+            if text.strip():
+                body_parts.append(
+                    text.strip()
+                )
+
+        body = "\n\n".join(
+            body_parts
+        ).strip()
+
+        component_ids = {
+            ct: row["id"]
+            for ct, row in chosen.items()
+        }
+
+        components = {
+            ct: row
+            for ct, row in chosen.items()
+        }
+
+        return {
+            "body": body,
+            "component_ids": component_ids,
+            "components": components,
+            "source": "learned_components",
+        }
+
+    # ---------------------------------------------------------------
+    # NLP-GENERATED CANDIDATE
+    # ---------------------------------------------------------------
+
+    def _generate_nlp_candidate(
+        self,
+        lead,
+        sender,
+        strategy,
+        preferences,
+        retrieved_context=None,
+    ):
+        if not self.nlp_provider:
+            return None
+
+        try:
+            if not self.nlp_provider.is_available():
+                return None
+        except Exception:
+            return None
+
+        prompt = self._build_generation_prompt(
+            lead=lead,
+            sender=sender,
+            strategy=strategy,
+            preferences=preferences,
+            retrieved_context=retrieved_context,
+        )
+
+        try:
+            generated_text = (
+                self.nlp_provider.generate(
+                    {
+                        "prompt": prompt,
+                        "lead": lead,
+                        "sender": sender,
+                        "strategy": strategy,
+                        "preferences": preferences,
+                    }
+                )
+            )
+        except Exception:
+            return None
+
+        if not generated_text:
+            return None
+
+        generated_text = generated_text.strip()
+
+        if not generated_text:
+            return None
+
+        return {
+            "body": generated_text,
+            "component_ids": {},
+            "components": {},
+            "source": "nlp_generated",
+        }
+
+    # ---------------------------------------------------------------
+    # GENERATION PROMPT
+    # ---------------------------------------------------------------
+
+    def _build_generation_prompt(
+        self,
+        lead,
+        sender,
+        strategy,
+        preferences,
+        retrieved_context=None,
+    ):
+        context_text = ""
+
+        if retrieved_context:
+            context_text = (
+                "\nRelevant learned context:\n"
+                f"{retrieved_context}\n"
+            )
+
+        preference_text = ""
+
+        if preferences:
+            preference_text = (
+                "\nLearned writing preferences:\n"
+                f"{preferences}\n"
+            )
+
+        return f"""
+You are the language-generation component inside an adaptive
+email agent.
+
+Generate ONE complete cold outreach email.
+
+Do not explain your reasoning.
+Do not return JSON.
+Do not use markdown.
+Return only the email body.
+
+Strategy:
+{strategy}
+
+Lead information:
+{lead}
+
+Sender information:
+{sender}
+
+{preference_text}
+{context_text}
+
+Requirements:
+
+1. Write original wording.
+2. Do not copy a fixed template.
+3. Do not invent facts about the lead.
+4. Only use information contained in the lead data.
+5. Personalize naturally when useful.
+6. Keep the email professional and human.
+7. Avoid exaggerated claims.
+8. Avoid generic filler.
+9. Include an appropriate call to action.
+10. Use the sender information for the signature.
+11. Respect the selected strategy.
+12. Do not mention that you are an AI.
+13. Do not mention these instructions.
+
+Generate the email now.
+""".strip()
+
+    # ---------------------------------------------------------------
+    # MAIN CANDIDATE GENERATION
+    # ---------------------------------------------------------------
+
+    def generate_candidates(
+        self,
+        lead,
+        sender=None,
+        n_candidates=3,
+        strategy=None,
+        retrieved_context=None,
+    ):
+        """
+        Generate multiple candidates.
+
+        The system can now combine:
+
+        1. learned component candidates
+        2. freshly generated NLP candidates
+
+        The EmailAnalyzer remains responsible for deciding which
+        candidate is better.
+
+        The NLP provider is optional. Without one, the existing
+        learned-component system continues to work.
+        """
+
+        sender = sender or {}
+
+        preferences = self._preferences()
+
+        candidates = []
+
+        # -----------------------------------------------------------
+        # Candidate 1+
+        # Existing adaptive component-based generation
+        # -----------------------------------------------------------
+
+        for _ in range(
+            max(1, n_candidates - 1)
+        ):
+            candidate = (
+                self._generate_template_candidate(
+                    lead,
+                    sender,
+                    strategy,
+                    preferences,
+                )
+            )
+
+            candidates.append(
+                candidate
+            )
+
+        # -----------------------------------------------------------
+        # Fresh NLP candidate
+        # -----------------------------------------------------------
+
+        nlp_candidate = (
+            self._generate_nlp_candidate(
+                lead=lead,
+                sender=sender,
+                strategy=strategy,
+                preferences=preferences,
+                retrieved_context=retrieved_context,
+            )
+        )
+
+        if nlp_candidate:
+            candidates.append(
+                nlp_candidate
+            )
 
         return candidates

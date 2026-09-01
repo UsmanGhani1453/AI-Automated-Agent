@@ -1,23 +1,3 @@
-"""
-CLI entry point.
-
-Modes:
-    python main.py
-        Dry-run demo with simulated feedback.
-
-    python main.py --live
-        Actually send demo email via SMTP.
-
-    python main.py --inbox
-        Read unread Gmail messages and create local drafts.
-
-    python main.py --learn-edit EMAIL_ID --edited-file FILE
-        Teach the agent from a user-edited draft.
-
-Inbox mode is read-only and draft-first.
-It does not send, delete, or mark messages as read.
-"""
-
 from __future__ import annotations
 
 import argparse
@@ -28,6 +8,7 @@ from dotenv import load_dotenv
 load_dotenv()
 
 from app.agent.agent import Agent
+from app.nlp.optional_provider import LocalNLPProvider
 from app.database.database import init_db
 from app.database.repository import (
     EmailRepository,
@@ -139,11 +120,16 @@ def run_demo(args: argparse.Namespace) -> None:
     """
     init_db()
 
+    nlp_provider = LocalNLPProvider(
+        model="gemma2:2b",
+        host="http://localhost:11434",
+    )
+
     agent = Agent(
         sender_info=SENDER,
         dry_run=not args.live,
+        nlp_provider=nlp_provider,
     )
-
     print("=" * 70)
     print(
         "Running agent over demo leads "

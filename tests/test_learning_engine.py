@@ -209,3 +209,38 @@ def test_composer_prefers_short_strategy():
         "PROFESSIONAL_INTRO",
         "VALUE_FIRST",
     ]
+def test_strong_shorter_preference_reduces_component_count():
+    from app.email.composer import Composer
+
+    PreferenceRepository.upsert(
+        "prefers_shorter_emails",
+        "User prefers shorter emails.",
+        0.80,
+    )
+
+    PreferenceRepository.upsert(
+        "prefers_detailed_emails",
+        "User prefers more detailed emails.",
+        0.00,
+    )
+
+    composer = Composer()
+
+    preferences = composer._preferences()
+
+    normal = composer._preferred_component_order(
+        "LOCATION_PERSONALIZED",
+        {
+            "prefers_shorter_emails": 0.00,
+            "prefers_detailed_emails": 0.00,
+        },
+    )
+
+    shortened = composer._preferred_component_order(
+        "LOCATION_PERSONALIZED",
+        preferences,
+    )
+
+    assert len(shortened) < len(normal)
+    assert "cta" in shortened
+    assert "signature" in shortened

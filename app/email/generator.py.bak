@@ -22,7 +22,7 @@ MAX_ATTEMPTS = 3
 
 class EmailGenerator:
     def __init__(self, nlp_provider=None):
-        self.composer = Composer(nlp_provider=nlp_provider)
+        self.composer = Composer()
         self.analyzer = EmailAnalyzer()
         self.nlp_provider = nlp_provider  # optional, replaceable, never required
 
@@ -73,7 +73,7 @@ class EmailGenerator:
         attempts = []
 
         for attempt in range(1, MAX_ATTEMPTS + 1):
-            candidates = self.composer.generate_candidates(lead,sender,n_candidates=3,strategy=strategy,retrieved_context=retrieved_context,)
+            candidates = self.composer.generate_candidates(lead, sender, n_candidates=3, strategy=strategy)
             scored_candidates = []
             for c in candidates:
                 report = self.analyzer.analyze(c["body"], lead)

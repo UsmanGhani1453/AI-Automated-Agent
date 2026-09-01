@@ -1,19 +1,3 @@
-"""
-Pattern scorer: turns feedback into updated, explainable scores for
-- strategies (SHORT_DIRECT, LOCATION_PERSONALIZED, ...)
-- individual email components (a specific greeting/cta/opening text)
-
-Formula (deliberately simple and explainable, no black box):
-
-    score = (positive_count + REPLY_WEIGHT * reply_count + SMOOTHING * 0.5)
-            / (positive_count + negative_count + REPLY_WEIGHT * reply_count + SMOOTHING)
-
-This is Laplace/Bayesian smoothing: with zero samples the score is exactly
-0.5 (neutral prior), and it needs several consistent samples before moving
-far from neutral — which avoids one lucky/unlucky email swinging behavior.
-A reply counts as REPLY_WEIGHT positive samples because it's a much stronger
-signal of email quality than a subjective star rating.
-"""
 from app.database.repository import PatternRepository, ComponentRepository, PreferenceRepository
 
 REPLY_WEIGHT = 2
