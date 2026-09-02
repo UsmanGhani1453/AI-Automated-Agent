@@ -1,5 +1,5 @@
 from __future__ import annotations
-
+import pandas 
 import argparse
 import csv
 import os
@@ -26,56 +26,56 @@ from app.memory.semantic import SemanticMemory
 from app.tools.gmail_inbox import GmailInbox
 
 
-DEMO_LEADS = [
-    {
-        "officer": "James",
-        "company": "Redline Freight",
-        "fleet_size": "1",
-        "location": "Austin, TX",
-        "email": "james@example.com",
-        "category": "owner_operator",
-    },
-    {
-        "officer": "Maria",
-        "company": "Sunbelt Carriers",
-        "fleet_size": "3",
-        "location": "Dallas, TX",
-        "email": "maria@example.com",
-        "category": "small_fleet",
-    },
-    {
-        "officer": "Tom",
-        "company": "Coastal Hauling",
-        "fleet_size": "1",
-        "location": "Austin, TX",
-        "email": "tom@example.com",
-        "category": "owner_operator",
-    },
-    {
-        "officer": "Linda",
-        "company": "Pioneer Trucking",
-        "fleet_size": "6",
-        "location": "Houston, TX",
-        "email": "linda@example.com",
-        "category": "small_fleet",
-    },
-    {
-        "officer": "Carlos",
-        "company": "Vega Logistics",
-        "fleet_size": "2",
-        "location": "Austin, TX",
-        "email": "carlos@example.com",
-        "category": "owner_operator",
-    },
-    {
-        "officer": "Sam",
-        "company": "Northgate Freight",
-        "fleet_size": "1",
-        "location": "San Antonio, TX",
-        "email": "sam@example.com",
-        "category": "owner_operator",
-    },
-]
+# DEMO_LEADS = [
+#     {
+#         "officer": "James",
+#         "company": "Redline Freight",
+#         "fleet_size": "1",
+#         "location": "Austin, TX",
+#         "email": "james@example.com",
+#         "category": "owner_operator",
+#     },
+#     {
+#         "officer": "Maria",
+#         "company": "Sunbelt Carriers",
+#         "fleet_size": "3",
+#         "location": "Dallas, TX",
+#         "email": "maria@example.com",
+#         "category": "small_fleet",
+#     },
+#     {
+#         "officer": "Tom",
+#         "company": "Coastal Hauling",
+#         "fleet_size": "1",
+#         "location": "Austin, TX",
+#         "email": "tom@example.com",
+#         "category": "owner_operator",
+#     },
+#     {
+#         "officer": "Linda",
+#         "company": "Pioneer Trucking",
+#         "fleet_size": "6",
+#         "location": "Houston, TX",
+#         "email": "linda@example.com",
+#         "category": "small_fleet",
+#     },
+#     {
+#         "officer": "Carlos",
+#         "company": "Vega Logistics",
+#         "fleet_size": "2",
+#         "location": "Austin, TX",
+#         "email": "carlos@example.com",
+#         "category": "owner_operator",
+#     },
+#     {
+#         "officer": "Sam",
+#         "company": "Northgate Freight",
+#         "fleet_size": "1",
+#         "location": "San Antonio, TX",
+#         "email": "sam@example.com",
+#         "category": "owner_operator",
+#     },
+# ]
 
 
 SENDER = {
@@ -838,9 +838,16 @@ def main() -> None:
                 print("Aborted. No emails were sent.")
                 return
     else:
-        leads = DEMO_LEADS
+        parser.error(
+            "--leads-file is required. Demo leads are disabled."
+        )
 
-    run_demo(args, leads, using_real_leads)
+    # Run the agent after loading the real CSV leads.
+    run_demo(
+        args,
+        leads,
+        using_real_leads=True,
+    )
 
 
 if __name__ == "__main__":

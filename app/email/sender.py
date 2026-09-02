@@ -1,7 +1,10 @@
 import os
 import smtplib
+import socket
+import sqlite3
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+from email.utils import make_msgid
 
 
 class EmailSender:
@@ -25,18 +28,32 @@ class EmailSender:
                 "subject": subject,
             }
 
+        # Phase 6.3: fail safely rather than raising — a missing credential
+        # or a network blip must not crash the whole agent loop.
         if not self.sender_email or not self.sender_password:
-            raise RuntimeError(
-                "SENDER_EMAIL / SENDER_APP_PASSWORD not set."
-            )
+            return {
+                "status": "error",
+                "recipient": recipient_email,
+                "subject": subject,
+                "error": "SENDER_EMAIL / SENDER_APP_PASSWORD not set.",
+            }
+
+        message_id = make_msgid()
 
         msg = MIMEMultipart()
         msg["From"] = self.sender_email
         msg["To"] = recipient_email
         msg["Subject"] = subject
+        msg["Message-ID"] = message_id
         msg.attach(MIMEText(body, "plain"))
 
-        server = smtplib.SMTP(self.smtp_server, self.smtp_port)
+        try:
+            server = smtplib.SMTP(self.smtp_server, self.smtp_port, timeout=20)
+        except (OSError, socket.error) as exc:
+            return {
+                "status": "error", "recipient": recipient_email, "subject": subject,
+                "error": f"could not connect to SMTP server: {exc}",
+            }
 
         try:
             server.starttls()
@@ -52,7 +69,16 @@ class EmailSender:
                 "status": "sent",
                 "recipient": recipient_email,
                 "subject": subject,
+                "message_id": message_id,
             }
 
+        except smtplib.SMTPException as exc:
+            return {
+                "status": "error", "recipient": recipient_email, "subject": subject,
+                "error": f"SMTP send failed: {exc}",
+            }
         finally:
-            server.quit()
+            try:
+                server.quit()
+            except Exception:
+                pass

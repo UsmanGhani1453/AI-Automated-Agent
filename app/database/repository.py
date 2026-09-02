@@ -239,6 +239,15 @@ class EmailRepository:
             ).fetchall()
             return rows_to_dicts(rows)
 
+    @staticmethod
+    def set_outgoing_message_id(email_id, message_id):
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE emails SET outgoing_message_id=? WHERE id=?",
+                (message_id, email_id),
+            )
+
+
 
 class ComponentRepository:
     """Stores individual email building blocks (greeting/opening/cta/etc) and their learned scores."""
@@ -301,6 +310,110 @@ class ComponentRepository:
                    WHERE id=?""",
                 (pos, neg, replies, score, component_id),
             )
+
+
+class ReplyRepository:
+    """Phase 1: raw + structured recipient replies. Idempotent on mailbox_id
+    so the same inbox message can never be learned from twice."""
+
+    @staticmethod
+    def get_by_mailbox_id(mailbox_id):
+        with get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM replies WHERE mailbox_id=?", (str(mailbox_id),)
+            ).fetchone()
+            return row_to_dict(row)
+
+    @staticmethod
+    def create_or_get(mailbox_id, raw_fields):
+        """Insert the raw reply if it's new; otherwise return the existing
+        row untouched (idempotency — never overwrite a processed reply)."""
+        existing = ReplyRepository.get_by_mailbox_id(mailbox_id)
+        if existing:
+            return existing, False
+        with get_conn() as conn:
+            conn.execute(
+                """INSERT INTO replies
+                   (mailbox_id, message_id, in_reply_to, references_header, thread_key,
+                    sender_email, recipient_email, subject, raw_reply, received_at,
+                    created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    str(mailbox_id), raw_fields.get("message_id", ""),
+                    raw_fields.get("in_reply_to", ""), raw_fields.get("references", ""),
+                    raw_fields.get("thread_key", ""), raw_fields.get("sender_email", ""),
+                    raw_fields.get("recipient_email", ""), raw_fields.get("subject", ""),
+                    raw_fields.get("raw_reply", ""), raw_fields.get("received_at", now()),
+                    now(), now(),
+                ),
+            )
+        return ReplyRepository.get_by_mailbox_id(mailbox_id), True
+
+    @staticmethod
+    def set_match(mailbox_id, lead_id, email_id, method, confidence):
+        with get_conn() as conn:
+            conn.execute(
+                """UPDATE replies
+                   SET matched_lead_id=?, matched_email_id=?, match_method=?,
+                       match_confidence=?, updated_at=?
+                   WHERE mailbox_id=?""",
+                (lead_id, email_id, method, confidence, now(), str(mailbox_id)),
+            )
+
+    @staticmethod
+    def set_analysis(mailbox_id, analysis):
+        with get_conn() as conn:
+            conn.execute(
+                """UPDATE replies
+                   SET intent=?, sentiment=?, interest_level=?, objection=?, question=?,
+                       requested_action=?, urgency=?, topic=?, outcome=?,
+                       analysis_confidence=?, analysis_json=?, updated_at=?
+                   WHERE mailbox_id=?""",
+                (
+                    analysis["intent"], analysis["sentiment"], analysis["interest_level"],
+                    analysis["objection"], analysis["question"], analysis["requested_action"],
+                    analysis["urgency"], analysis["topic"], analysis["outcome"],
+                    analysis["confidence"], dumps(analysis), now(), str(mailbox_id),
+                ),
+            )
+
+    @staticmethod
+    def set_requires_review(mailbox_id, requires_review):
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE replies SET requires_review=?, updated_at=? WHERE mailbox_id=?",
+                (int(bool(requires_review)), now(), str(mailbox_id)),
+            )
+
+    @staticmethod
+    def mark_learned(mailbox_id):
+        with get_conn() as conn:
+            conn.execute(
+                "UPDATE replies SET learned=1, updated_at=? WHERE mailbox_id=?",
+                (now(), str(mailbox_id)),
+            )
+
+    @staticmethod
+    def is_learned(mailbox_id):
+        row = ReplyRepository.get_by_mailbox_id(mailbox_id)
+        return bool(row and row.get("learned"))
+
+    @staticmethod
+    def for_email(email_id):
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM replies WHERE matched_email_id=? ORDER BY id ASC", (email_id,)
+            ).fetchall()
+            return rows_to_dicts(rows)
+
+    @staticmethod
+    def pending_review(limit=20):
+        with get_conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM replies WHERE requires_review=1 AND learned=0 ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return rows_to_dicts(rows)
 
 
 class FeedbackRepository:

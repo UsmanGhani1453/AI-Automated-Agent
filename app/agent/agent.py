@@ -31,7 +31,10 @@ from app.tools.database import DatabaseTool
 from app.tools.gmail import GmailTool
 
 from app.database.database import get_conn, now
-from app.database.repository import LeadRepository, EmailRepository
+from app.database.repository import LeadRepository, EmailRepository, ReplyRepository
+
+from app.email.reply_analyzer import ReplyAnalyzer
+from app.email.reply_matcher import ReplyMatcher
 
 
 class Agent:
@@ -72,6 +75,12 @@ class Agent:
         # -------------------------
         self.generator = EmailGenerator(nlp_provider=nlp_provider)
         self.validator = EmailValidator()
+
+        # -------------------------
+        # REPLY INTELLIGENCE (Phase 1)
+        # -------------------------
+        self.reply_analyzer = ReplyAnalyzer()
+        self.reply_matcher = ReplyMatcher()
 
         # -------------------------
         # TOOLS
@@ -258,6 +267,13 @@ class Agent:
 
         return result
 
+    def _record_sent_message_id(self, email_id, send_result):
+        """Persist the outgoing Message-ID (Phase 1.3) so a future reply's
+        In-Reply-To/References header can be matched deterministically."""
+        message_id = send_result.get("message_id")
+        if email_id and message_id:
+            EmailRepository.set_outgoing_message_id(email_id, message_id)
+
     # ============================================================
     # LEARN
     # ============================================================
@@ -295,6 +311,191 @@ class Agent:
             email_id=generated.get("email_id"),
             component_ids=generated.get("component_ids"),
         )
+
+    # ============================================================
+    # PHASE 5.2: APPROVAL vs FEEDBACK are independent states
+    # ============================================================
+
+    def approve_email(self, email_id):
+        """Mark an email approved for sending. Independent of feedback —
+        approving does not imply a rating/comment was given."""
+        EmailRepository.approve(email_id)
+        return {"email_id": email_id, "approved": True}
+
+    def reject_email(self, email_id, reason=""):
+        """Explicitly hold an email back from sending. Distinct from
+        negative feedback: a reject with no rating/comment records no
+        feedback at all, just a decision not to send."""
+        return {"email_id": email_id, "approved": False, "reason": reason}
+
+    def record_feedback(self, lead, generated, rating=None, comment="",
+                         user_edited_email=None, replied=False):
+        """Record human feedback (rating/comment/edit) and trigger learning.
+
+        This is deliberately separate from approve_email/reject_email:
+        a user may approve an email with no feedback, or leave feedback
+        without approving it. Feedback always flows into the learning
+        engine when present; approval only controls whether SEND happens.
+        """
+        return self.learn(
+            lead, generated,
+            user_action="edit" if user_edited_email else "feedback",
+            rating=rating, replied=replied, comment=comment,
+            user_edited_email=user_edited_email,
+            outcome="feedback_recorded",
+        )
+
+    # ============================================================
+    # PHASE 1/2/6: REPLY INTELLIGENCE + LEARNING FROM REPLIES
+    # ============================================================
+
+    def process_reply(self, raw_message: dict):
+        """
+        Full reply pipeline for one inbound message believed to be a reply
+        to outreach we sent:
+
+            store raw reply (idempotent)
+              -> match to sent email / lead (explainable, confidence-scored)
+              -> analyze intent/sentiment/outcome (explainable, confidence-scored)
+              -> gate learning on both confidences (Phase 6 decision policy)
+              -> learn (updates strategy/component/pattern scores) if trusted
+              -> otherwise queue for human review, never silently guess
+
+        raw_message: {
+            "id": mailbox/IMAP id (required, used as idempotency key),
+            "message_id": RFC822 Message-ID,
+            "in_reply_to": header value,
+            "references": header value,
+            "from_email": sender address,
+            "to": recipient address (our mailbox),
+            "subject": subject line,
+            "body": raw reply text,
+            "date": received date (optional),
+        }
+        """
+        result = {"steps": []}
+
+        mailbox_id = raw_message.get("id")
+        if not mailbox_id:
+            result["outcome"] = "error"
+            result["error"] = "raw_message missing 'id' (mailbox identifier); cannot guarantee idempotency"
+            return result
+
+        # ---- 1. Idempotency: never process/learn from the same reply twice ----
+        if ReplyRepository.is_learned(mailbox_id):
+            result["outcome"] = "already_learned"
+            result["steps"].append(("idempotency_check", "already learned, skipped"))
+            return result
+
+        # ---- 2. Store raw reply (never destroyed/overwritten) ----
+        raw_fields = {
+            "message_id": raw_message.get("message_id", ""),
+            "in_reply_to": raw_message.get("in_reply_to", ""),
+            "references": raw_message.get("references", ""),
+            "thread_key": raw_message.get("thread_key", ""),
+            "sender_email": (raw_message.get("from_email") or "").lower().strip(),
+            "recipient_email": raw_message.get("to", ""),
+            "subject": raw_message.get("subject", ""),
+            "raw_reply": raw_message.get("body", ""),
+            "received_at": raw_message.get("date", now()),
+        }
+
+        try:
+            reply_row, created = ReplyRepository.create_or_get(mailbox_id, raw_fields)
+        except Exception as exc:
+            # Phase 6.3: database failure must not crash the agent.
+            result["outcome"] = "error"
+            result["error"] = f"failed to persist raw reply: {exc}"
+            return result
+
+        result["steps"].append(("store_raw_reply", "created" if created else "already stored"))
+        result["reply_mailbox_id"] = mailbox_id
+
+        # ---- 3. Match reply -> sent email / lead ----
+        try:
+            match = self.reply_matcher.match({
+                "sender_email": raw_fields["sender_email"],
+                "subject": raw_fields["subject"],
+                "in_reply_to": raw_fields["in_reply_to"],
+                "references": raw_fields["references"],
+            })
+        except Exception as exc:
+            result["outcome"] = "error"
+            result["error"] = f"reply matching failed: {exc}"
+            return result
+
+        ReplyRepository.set_match(
+            mailbox_id, match["lead_id"], match["email_id"], match["method"], match["confidence"],
+        )
+        result["match"] = match
+        result["steps"].append(("match_reply", match["method"]))
+
+        match_decision = self.decision_engine.decide_on_reply_match(match)
+        result["match_decision"] = match_decision.to_dict()
+
+        if match_decision.action == "reject_match":
+            result["outcome"] = "match_rejected"
+            return result
+
+        # ---- 4. Analyze reply content ----
+        try:
+            analysis = self.reply_analyzer.analyze(raw_fields["raw_reply"], raw_fields["subject"])
+        except Exception as exc:
+            result["outcome"] = "error"
+            result["error"] = f"reply analysis failed: {exc}"
+            return result
+
+        ReplyRepository.set_analysis(mailbox_id, analysis)
+        result["analysis"] = analysis
+        result["steps"].append(("analyze_reply", analysis["intent"]))
+
+        analysis_decision = self.decision_engine.decide_on_reply_analysis(analysis)
+        result["analysis_decision"] = analysis_decision.to_dict()
+
+        needs_review = (
+            match_decision.action == "require_human_review"
+            or analysis_decision.action == "require_human_review"
+        )
+        if needs_review:
+            ReplyRepository.set_requires_review(mailbox_id, True)
+            result["outcome"] = "pending_human_review"
+            return result
+
+        # ---- 5. Learn from this reply (high-confidence match + analysis) ----
+        email = EmailRepository.get(match["email_id"])
+        if not email:
+            result["outcome"] = "error"
+            result["error"] = "matched email_id no longer exists"
+            return result
+
+        lead = LeadRepository.get(email["lead_id"])
+        if not lead:
+            result["outcome"] = "error"
+            result["error"] = "matched lead no longer exists"
+            return result
+
+        learn_result = self.learn(
+            lead=lead,
+            generated={
+                "strategy": email["strategy"],
+                "components": email["components"],
+                "body": email["body"],
+                "analyzer_report": email["analyzer_report"],
+                "component_ids": {},  # component ids for this historical email aren't retained separately
+                "email_id": email["id"],
+            },
+            user_action="reply_received",
+            replied=True,
+            outcome=analysis["outcome"],
+        )
+
+        ReplyRepository.mark_learned(mailbox_id)
+        LeadRepository.set_status(lead["id"], "replied")
+
+        result["outcome"] = "learned"
+        result["learn_result"] = learn_result
+        result["steps"].append(("learn", analysis["outcome"]))
+        return result
 
     # ============================================================
     # FULL AGENT LOOP
@@ -590,13 +791,16 @@ class Agent:
                 EmailRepository.mark_sent(
                     email_id
                 )
+                self._record_sent_message_id(email_id, send_result)
 
                 log["outcome"] = "sent"
                 learn_outcome = "sent"
 
             else:
-                # Gmail/tool reported a failure.
+                # Gmail/tool reported a failure (status: "error" or
+                # anything unrecognized) — fail safely, do not raise.
                 log["outcome"] = "send_failed"
+                log["send_error"] = send_result.get("error", "unknown send failure")
                 learn_outcome = "send_failed"
 
         # ========================================================

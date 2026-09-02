@@ -85,13 +85,107 @@ python main.py --rounds 4
 
 This runs the agent against 6 demo leads with **simulated, strategy-correlated feedback** (no real email sent — `dry_run=True` by default) so you can watch `learned_patterns` scores diverge across rounds and see the derived semantic-memory statements at the end. Use `python main.py --live` (after filling in `.env`) to actually send.
 
+## Reply intelligence (Phase 1)
+
+`app/email/reply_analyzer.py` turns a raw recipient reply into structured
+data — `intent`, `sentiment`, `interest_level`, `objection`, `question`,
+`requested_action`, `urgency`, `topic`, `outcome` — using the same
+deterministic, regex-based philosophy as the rest of the agent (no black-box
+classifier). Every field carries a `confidence` score derived from how
+specific the matched pattern was.
+
+`app/email/reply_matcher.py` matches an inbound reply back to the sent email
+(and lead) that caused it, trying strategies in order of reliability:
+1. `In-Reply-To` / `References` header → outgoing `Message-ID` (needs
+   `GmailTool`/`EmailSender` to have recorded the Message-ID at send time —
+   it now does, via `emails.outgoing_message_id`)
+2. sender address → known lead → most recently sent email to that lead
+3. falls through to "no match" rather than guessing when neither signal is present
+
+Raw replies are stored once, permanently, in the `replies` table — the
+original text is never mutated, only the matching/analysis columns are
+filled in alongside it. Reprocessing the same inbox message (same
+`mailbox_id`) is a no-op (`ReplyRepository.is_learned` / idempotent insert).
+
+## Learning from replies (Phase 2) + confidence-gated learning (Phase 6)
+
+`Agent.process_reply(raw_message)` runs the full pipeline: store raw reply →
+match → analyze → **gate on confidence** → learn. `DecisionEngine.decide_on_reply_match`
+and `decide_on_reply_analysis` implement the policy:
+
+- high match + analysis confidence → `auto_learn`: the reply becomes a real
+  `Experience` (via `Agent.learn`) with `replied=True` and the analyzed
+  `outcome`, updating strategy/component/pattern scores exactly like a
+  rating would.
+- medium confidence → `require_human_review`: the reply is stored and
+  flagged (`replies.requires_review=1`) but **not** learned from until a
+  human confirms it (`ReplyRepository.pending_review()`).
+- low/no match → `reject_match`: stored for audit, never learned from.
+
+This closes the loop the spec asked for: *what the agent learns from
+interaction N measurably changes interaction N+1* — see
+`tests/test_reply_learning_integration.py::test_end_to_end_behavior_changes_from_reply`,
+which forces one strategy through several positive-reply interactions and
+proves both the strategy's learned score *and* future `select_strategy()`
+calls shift in response, compared to an untouched competing strategy.
+
+## Approval vs. feedback (Phase 5.2)
+
+These are independent states, not the same thing:
+- `Agent.approve_email(email_id)` / `reject_email(email_id)` — controls
+  whether SEND happens. Carries no rating or comment.
+- `Agent.record_feedback(lead, generated, rating=..., comment=..., user_edited_email=...)`
+  — feeds the learning engine. Can be called with or without approval ever
+  having happened.
+
+## Safety (Phase 6)
+
+- Every reply-pipeline decision carries an explicit confidence number and a
+  human-readable reason (`Decision.reason`), so "why did the agent learn
+  (or not learn) from this reply?" always has a concrete answer.
+- `EmailSender.send()` and `Agent.process_reply()` fail safely: SMTP/IMAP/DB
+  errors return a structured `{"status": "error", "error": "..."}` result
+  instead of raising and crashing the loop; `run_for_lead`/`process_reply`
+  record the failure and stop rather than guessing.
+- Idempotency: `replies.mailbox_id` is unique, and `replies.learned` is only
+  ever set once — the same inbound message can never be learned from twice.
+
+## Testing (Phase 7)
+
+`tests/test_reply_analyzer.py` — one test per intent (interested, not
+interested, meeting request, price objection, unsubscribe, question,
+neutral, unknown, follow-up) plus a full-field sanity check.
+
+`tests/test_reply_matcher.py` — Message-ID match, References-header match,
+sender-only match, "lead known but nothing sent" match, no-match, and a
+false-positive guard (an unrelated header must not block a valid sender match).
+
+`tests/test_reply_learning_integration.py` — idempotency (same reply
+processed twice only learns once), low-confidence match rejection, strategy
+pattern scores updating from a real reply, and the end-to-end test described
+above that proves measurable behavioral change from experience.
+
+Run everything: `pytest -q` (59 tests as of this rebuild).
+
+## Repository cleanup and security (Phase 8)
+
+This pass removed committed `.bak`/`.backup` files and stale SQLite backups,
+replaced real personal email addresses that had been committed in
+`your_leads.csv` and `tests/test_decision_engine.py` with `example.com`
+placeholders, replaced a hardcoded look-real Gmail address that was used as
+a fallback sender default in `composer.py` with an obvious placeholder, and
+widened `.gitignore` to also exclude `*.bak`, `*.backup*`, `*.sqlite*`,
+`.pytest_cache/`, `playwright_auth.json`, and `your_leads.csv` itself (use
+`your_leads.example.csv`-style sample data instead of real lead lists going
+forward). No live credentials were found in this pass, but if this repo was
+ever public with real credentials in history, they should still be
+considered compromised and rotated, and scrubbed from git history with
+`git filter-repo` or the BFG Repo-Cleaner.
+
 ## Roadmap / what's not built yet
 
-This delivers Phases 1–8 of the original plan (audit, agent core, memory, decision engine, planning, email composition/analysis, feedback plumbing, online learning) as a working, tested foundation. Not yet built:
 - **Phase 9** — wiring `LeadScraperTool` into a live end-to-end run against TruckerDB (untested here since it needs your live, rotated credentials).
-- **Phase 10** — a dashboard (FastAPI routes exist as a placeholder package `app/api/`; nothing implemented yet).
-- **Phase 11** — automated tests (pytest) over the decision engine, analyzer, and learning engine — these are the modules most worth locking down with tests before you build on top.
+- **Phase 10** — a dashboard (FastAPI routes exist as a placeholder package `app/api/`; nothing implemented yet). Would also be the natural place to surface `ReplyRepository.pending_review()` for human-in-the-loop confirmation.
 - **Scheduler** — the internal scheduler for follow-ups/periodic learning-stat cleanup described in the spec isn't implemented; `main.py` is a manual/cron-triggerable entry point for now.
-- **Real NLP provider wiring** — `LocalNLPProvider` exists but nothing calls it yet; it's meant to be invoked from `Composer` to propose *new* candidate component text when you want the pool to grow beyond the seed set.
-
-I'd suggest tackling the dashboard and tests next, in that order — the dashboard gives you visibility into what the agent is actually learning, and tests protect the decision/learning logic before you extend it further.
+- **Real NLP provider wiring for reply text** — `LocalNLPProvider` is used for email *generation*; the reply analyzer is intentionally rule-based only (explainability), but a model-assisted second opinion on ambiguous replies (confidence < threshold) would be a reasonable Phase-9-adjacent addition instead of just queuing them for a human.
+- **Gmail IMAP wiring for `process_reply`** — `GmailInbox.fetch_unread()` returns raw messages in the right shape for `Agent.process_reply`, but nothing in `main.py` polls the inbox and feeds them through yet; today `process_reply` is called directly (see the tests) rather than from a live loop.

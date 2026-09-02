@@ -98,6 +98,7 @@ CREATE TABLE IF NOT EXISTS emails (
     approved INTEGER DEFAULT 0,
     sent INTEGER DEFAULT 0,
     sent_at TEXT,
+    outgoing_message_id TEXT,         -- RFC822 Message-ID assigned when actually sent (for reply matching)
     created_at TEXT NOT NULL
 );
 
@@ -125,6 +126,48 @@ CREATE TABLE IF NOT EXISTS inbox_messages (
 
 CREATE INDEX IF NOT EXISTS idx_inbox_thread_key ON inbox_messages(thread_key);
 CREATE INDEX IF NOT EXISTS idx_inbox_from_email ON inbox_messages(from_email);
+
+-- Phase 1: structured, matched, learnable replies to sent outreach emails.
+-- Distinct from inbox_messages (general inbox triage) — this table is
+-- specifically for replies to emails *we* sent as part of outreach, and
+-- carries reply-to-email matching + structured intent/sentiment analysis
+-- so the learning engine can learn from real recipient responses.
+CREATE TABLE IF NOT EXISTS replies (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    mailbox_id TEXT UNIQUE NOT NULL,   -- IMAP UID or provider id; idempotency key
+    message_id TEXT,                  -- RFC822 Message-ID
+    in_reply_to TEXT,
+    references_header TEXT,
+    thread_key TEXT,
+    sender_email TEXT,
+    recipient_email TEXT,
+    subject TEXT,
+    raw_reply TEXT NOT NULL,          -- original body, never overwritten
+    received_at TEXT,
+    matched_lead_id INTEGER,
+    matched_email_id INTEGER,
+    match_method TEXT,                -- message_id, in_reply_to, sender, subject_time, none
+    match_confidence REAL DEFAULT 0.0,
+    intent TEXT,
+    sentiment TEXT,
+    interest_level TEXT,
+    objection TEXT,
+    question TEXT,
+    requested_action TEXT,
+    urgency TEXT,
+    topic TEXT,
+    outcome TEXT,
+    analysis_confidence REAL DEFAULT 0.0,
+    analysis_json TEXT,               -- full structured analysis, for audit
+    learned INTEGER DEFAULT 0,        -- idempotency: learned from at most once
+    requires_review INTEGER DEFAULT 0,-- low-confidence match/analysis needs a human
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_replies_matched_lead ON replies(matched_lead_id);
+CREATE INDEX IF NOT EXISTS idx_replies_matched_email ON replies(matched_email_id);
+CREATE INDEX IF NOT EXISTS idx_replies_sender ON replies(sender_email);
 
 CREATE TABLE IF NOT EXISTS conversation_profiles (
     id INTEGER PRIMARY KEY AUTOINCREMENT,

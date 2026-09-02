@@ -8,7 +8,7 @@ load_dotenv()
 sender = os.getenv("SENDER_EMAIL")
 password = os.getenv("SENDER_APP_PASSWORD")
 
-recipient = "usmanghanivhr1453@gmail.com"
+recipient = os.getenv("TEST_RECIPIENT_EMAIL", "test-recipient@example.com")
 
 msg = MIMEText("Hello, this is a real test email from my Adaptive Email Agent.")
 msg["Subject"] = "Test Email"

@@ -10,6 +10,14 @@ from app.database.repository import SuppressionRepository, LeadRepository
 QUALITY_ACCEPT_THRESHOLD = 0.55
 RECENT_CONTACT_DAYS = 14
 
+# Phase 6: confidence policy for reply matching/analysis.
+# high confidence -> automatic learning
+# medium confidence -> flagged for human review, but still tentatively recorded
+# low confidence -> rejected outright; never learned from
+MATCH_CONFIDENCE_AUTO = 0.75
+MATCH_CONFIDENCE_REVIEW = 0.40
+ANALYSIS_CONFIDENCE_AUTO = 0.6
+
 
 class Decision:
     def __init__(self, action, reason, data=None):
@@ -78,3 +86,58 @@ class DecisionEngine:
         if approved:
             return Decision("send", "user approved the email")
         return Decision("hold", "user did not approve; email will not be sent")
+
+    # ================================================================
+    # PHASE 6: reply match / analysis confidence policy
+    # ================================================================
+
+    def decide_on_reply_match(self, match: dict) -> Decision:
+        """Gate learning on how confident the reply-to-email match is.
+
+        high confidence  -> auto_learn   (safe to update strategy/pattern scores)
+        medium confidence -> require_human_review (record the reply, don't learn yet)
+        low confidence    -> reject_match (store raw reply only, no learning, no review queue)
+        """
+        confidence = match.get("confidence", 0.0)
+        if match.get("email_id") is None:
+            return Decision(
+                "reject_match",
+                f"no sent email could be matched to this reply (method={match.get('method')})",
+                data={"confidence": confidence},
+            )
+        if confidence >= MATCH_CONFIDENCE_AUTO:
+            return Decision(
+                "auto_learn",
+                f"reply matched via {match.get('method')} with high confidence ({confidence:.2f})",
+                data={"confidence": confidence},
+            )
+        if confidence >= MATCH_CONFIDENCE_REVIEW:
+            return Decision(
+                "require_human_review",
+                f"reply matched via {match.get('method')} but confidence is only medium "
+                f"({confidence:.2f}); needs human confirmation before learning",
+                data={"confidence": confidence},
+            )
+        return Decision(
+            "reject_match",
+            f"match confidence too low to trust ({confidence:.2f})",
+            data={"confidence": confidence},
+        )
+
+    def decide_on_reply_analysis(self, analysis: dict) -> Decision:
+        """Gate learning on how confident the reply's intent/outcome
+        classification is, independent of the matching confidence above."""
+        confidence = analysis.get("confidence", 0.0)
+        if confidence >= ANALYSIS_CONFIDENCE_AUTO:
+            return Decision(
+                "trust_analysis",
+                f"reply analysis confidence {confidence:.2f} meets threshold "
+                f"({ANALYSIS_CONFIDENCE_AUTO})",
+                data={"confidence": confidence},
+            )
+        return Decision(
+            "require_human_review",
+            f"reply analysis confidence {confidence:.2f} below threshold "
+            f"({ANALYSIS_CONFIDENCE_AUTO}); intent is ambiguous",
+            data={"confidence": confidence},
+        )

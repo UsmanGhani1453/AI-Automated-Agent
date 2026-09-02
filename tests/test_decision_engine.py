@@ -4,7 +4,7 @@ from app.database.repository import SuppressionRepository, LeadRepository
 
 def make_lead(**overrides):
     lead = {
-        "email": "usmanghanivhr1453@gmail.com", "officer": "Jane", "company": "Acme Freight",
+        "email": "test-lead@example.com", "officer": "Jane", "company": "Acme Freight",
         "fleet_size": "2", "location": "Austin, TX",
     }
     lead.update(overrides)

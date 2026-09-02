@@ -70,9 +70,9 @@ STRATEGY_COMPONENT_ORDER = {
 
 
 DEFAULT_SENDER = {
-    "sender_name": "Natasha Roman",
+    "sender_name": "Your Name",
     "sender_title": "Dispatch Operations Manager",
-    "sender_email": "natasharoman5667@gmail.com",
+    "sender_email": "you@example.com",
 }
 
 
