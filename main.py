@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import os
 import random
 
 from dotenv import load_dotenv
@@ -77,10 +79,87 @@ DEMO_LEADS = [
 
 
 SENDER = {
-    "sender_name": "Natasha Roman",
-    "sender_title": "Dispatch Operations Manager",
-    "sender_email": "natasha@example.com",
+    "sender_name": os.environ.get("SENDER_NAME", "Natasha Roman"),
+    "sender_title": os.environ.get(
+        "SENDER_TITLE", "Dispatch Operations Manager"
+    ),
+    # Optional — leave blank in .env if you're operating as an
+    # individual/owner-operator rather than under a company name.
+    "sender_company": os.environ.get("SENDER_COMPANY", ""),
+    # IMPORTANT: this must be the same mailbox SENDER_EMAIL points to
+    # for SMTP auth (app/email/sender.py), or replies from real leads
+    # go to an address nobody is reading.
+    "sender_email": os.environ.get("SENDER_EMAIL", "natasha@example.com"),
 }
+
+if SENDER["sender_email"] == "natasha@example.com":
+    print(
+        "WARNING: SENDER_EMAIL is not set in .env — outgoing emails "
+        "will show a fake reply-to address that nobody can reply to. "
+        "Set SENDER_EMAIL in .env before running --live."
+    )
+
+
+REQUIRED_LEAD_FIELDS = (
+    "officer",
+    "company",
+    "fleet_size",
+    "location",
+    "email",
+    "category",
+)
+
+
+def load_leads_from_csv(path: str) -> list:
+   
+    with open(path, "r", encoding="utf-8-sig", newline="") as handle:
+        reader = csv.DictReader(handle)
+
+        if reader.fieldnames is None:
+            raise RuntimeError(f"'{path}' is empty.")
+
+        missing = [
+            field
+            for field in REQUIRED_LEAD_FIELDS
+            if field not in reader.fieldnames
+        ]
+
+        if missing:
+            raise RuntimeError(
+                f"'{path}' is missing required column(s): "
+                f"{', '.join(missing)}. Expected header: "
+                f"{','.join(REQUIRED_LEAD_FIELDS)}"
+            )
+
+        leads = []
+
+        for row_num, row in enumerate(reader, start=2):
+            email = (row.get("email") or "").strip()
+
+            if not email or "@" not in email:
+                print(
+                    f"  [skipping row {row_num}: "
+                    f"missing/invalid email: {row!r}]"
+                )
+                continue
+
+            leads.append(
+                {
+                    "officer": (row.get("officer") or "").strip(),
+                    "company": (row.get("company") or "").strip(),
+                    "fleet_size": (row.get("fleet_size") or "").strip(),
+                    "location": (row.get("location") or "").strip(),
+                    "email": email,
+                    "category": (row.get("category") or "").strip(),
+                }
+            )
+
+        if not leads:
+            raise RuntimeError(
+                f"No valid leads found in '{path}'."
+            )
+
+        return leads
 
 
 def simulate_feedback(strategy: str) -> dict:
@@ -114,9 +193,11 @@ def simulate_feedback(strategy: str) -> dict:
     }
 
 
-def run_demo(args: argparse.Namespace) -> None:
+def run_demo(args: argparse.Namespace, leads: list, using_real_leads: bool) -> None:
     """
-    Run the existing offline learning demonstration.
+    Run the agent over either the built-in demo leads (with simulated,
+    strategy-correlated feedback) or a real lead list loaded from CSV
+    (no simulated feedback — real outcomes only).
     """
     init_db()
 
@@ -131,14 +212,26 @@ def run_demo(args: argparse.Namespace) -> None:
         nlp_provider=nlp_provider,
     )
     print("=" * 70)
-    print(
-        "Running agent over demo leads "
-        "(dry_run=%s)" % (not args.live)
-    )
-    print(
-        "Feedback is simulated but strategy-correlated, "
-        "to demonstrate learning."
-    )
+    if using_real_leads:
+        print(
+            "Running agent over %d REAL lead(s) "
+            "(dry_run=%s)" % (len(leads), not args.live)
+        )
+        print(
+            "No feedback is simulated — outcomes reflect "
+            "real sends only. Learning updates only from "
+            "explicit --learn-edit runs or real reply data "
+            "you feed in later."
+        )
+    else:
+        print(
+            "Running agent over demo leads "
+            "(dry_run=%s)" % (not args.live)
+        )
+        print(
+            "Feedback is simulated but strategy-correlated, "
+            "to demonstrate learning."
+        )
     print("=" * 70)
 
     for round_num in range(
@@ -149,7 +242,7 @@ def run_demo(args: argparse.Namespace) -> None:
             f"\n--- Learning round {round_num} ---"
         )
 
-        for raw_lead in DEMO_LEADS:
+        for raw_lead in leads:
             lead = agent.perceive(raw_lead)
 
             memory_context = (
@@ -177,7 +270,8 @@ def run_demo(args: argparse.Namespace) -> None:
 
             generated = (
                 agent.execute_generate_email(
-                    lead # type: ignore
+                    lead, # type: ignore
+                    forced_strategy=getattr(args, "strategy", None),
                 )
             )
 
@@ -208,9 +302,16 @@ def run_demo(args: argparse.Namespace) -> None:
 
             generated["email_id"] = email_id
 
-            feedback = simulate_feedback(
-                generated["strategy"]
-            )
+            if using_real_leads:
+                feedback = {
+                    "rating": None,
+                    "replied": False,
+                    "comment": "",
+                }
+            else:
+                feedback = simulate_feedback(
+                    generated["strategy"]
+                )
 
             EmailRepository.approve(
                 email_id
@@ -596,6 +697,49 @@ def main() -> None:
         ),
     )
 
+    parser.add_argument(
+        "--leads-file",
+        type=str,
+        metavar="CSV_PATH",
+        help=(
+            "path to a CSV of real leads "
+            "(columns: officer,company,fleet_size,"
+            "location,email,category). "
+            "Replaces the built-in demo leads "
+            "and disables simulated feedback."
+        ),
+    )
+
+    parser.add_argument(
+        "--yes",
+        action="store_true",
+        help=(
+            "skip the confirmation prompt when "
+            "sending real emails to real leads "
+            "(--leads-file + --live)"
+        ),
+    )
+
+    parser.add_argument(
+        "--strategy",
+        type=str,
+        choices=[
+            "SHORT_DIRECT",
+            "PROFESSIONAL_INTRO",
+            "LOCATION_PERSONALIZED",
+            "VALUE_FIRST",
+        ],
+        default=None,
+        help=(
+            "force every email in this run to use "
+            "the same strategy (same structure/length) "
+            "instead of letting the agent auto-select "
+            "per lead. SHORT_DIRECT is shortest; "
+            "PROFESSIONAL_INTRO / LOCATION_PERSONALIZED / "
+            "VALUE_FIRST are longer, with more components."
+        ),
+    )
+
     args = parser.parse_args()
 
     # --------------------------------------------------------------
@@ -659,10 +803,44 @@ def main() -> None:
         return
 
     # --------------------------------------------------------------
-    # Default demo
+    # Default demo / real leads
     # --------------------------------------------------------------
 
-    run_demo(args)
+    using_real_leads = args.leads_file is not None
+
+    if using_real_leads:
+        leads = load_leads_from_csv(args.leads_file)
+
+        print(
+            f"Loaded {len(leads)} real lead(s) "
+            f"from '{args.leads_file}'."
+        )
+
+        # A real lead list should never be looped multiple times
+        # in one run — that's how you accidentally email the same
+        # person 3+ times in a minute. --rounds is a demo-only knob.
+        if args.rounds != 1:
+            print(
+                "Note: --rounds is ignored for real leads "
+                "(forced to 1 to avoid duplicate sends)."
+            )
+        args.rounds = 1
+
+        if args.live and not args.yes:
+            print(
+                f"\nAbout to send REAL emails to "
+                f"{len(leads)} real recipient(s) via SMTP."
+            )
+            confirmation = input(
+                "Type 'yes' to continue, anything else to abort: "
+            )
+            if confirmation.strip().lower() != "yes":
+                print("Aborted. No emails were sent.")
+                return
+    else:
+        leads = DEMO_LEADS
+
+    run_demo(args, leads, using_real_leads)
 
 
 if __name__ == "__main__":

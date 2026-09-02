@@ -68,8 +68,8 @@ class EmailGenerator:
         scored.sort(key=lambda x: x[1], reverse=True)
         return scored[0][0]
 
-    def generate(self, lead, sender, retrieved_context=None):
-        strategy = self.select_strategy()
+    def generate(self, lead, sender, retrieved_context=None, forced_strategy=None):
+        strategy = forced_strategy or self.select_strategy()
         attempts = []
 
         for attempt in range(1, MAX_ATTEMPTS + 1):

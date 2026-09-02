@@ -31,7 +31,28 @@ class ReplyGenerator:
         "deal",
         "promotion",
         "marketing",
+        # Spanish equivalents (subscription mgmt / marketing copy)
+        "darte de baja",
+        "dejar de recibir",
+        "gestionar tus suscripciones",
+        "gestionar tu suscripción",
+        "cancelar suscripción",
+        "tienda online",
+        "descuento",
+        "código promocional",
     }
+
+    # Sender-domain fragments that indicate bulk/marketing senders
+    # even when the local part looks like a "real" account.
+    PROMO_DOMAIN_HINTS = (
+        "-free.",
+        "mailer.",
+        "mailing.",
+        "newsletter.",
+        "email.",
+        "campaign.",
+        "marketing.",
+    )
 
     def __init__(self, sender_info=None):
         self.sender_info = sender_info or {}
@@ -178,12 +199,21 @@ class ReplyGenerator:
             message.get("body") or ""
         ).lower()
 
+        haystack = f"{subject}\n{body}"
+
+        sender_domain = analysis.get(
+            "sender_email", ""
+        ).split("@", 1)[-1]
+
         if (
             any(
-                term in subject
+                term in haystack
                 for term in self.PROMO_TERMS
             )
-            or "unsubscribe" in body
+            or any(
+                hint in sender_domain
+                for hint in self.PROMO_DOMAIN_HINTS
+            )
         ):
             return (
                 "promotional",

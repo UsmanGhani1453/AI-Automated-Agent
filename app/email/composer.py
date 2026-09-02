@@ -457,6 +457,23 @@ class Composer:
                 f"{preferences}\n"
             )
 
+        length_guidance = {
+            "SHORT_DIRECT": (
+                "Keep this SHORT and to the point — "
+                "roughly 40-70 words total, 2-3 short "
+                "sentences plus signature. No long "
+                "backstory or extra paragraphs."
+            ),
+        }.get(
+            strategy,
+            (
+                "Keep this a moderate length — "
+                "roughly 90-150 words total, matching "
+                "a normal professional cold email. Do "
+                "not pad it out with extra paragraphs."
+            ),
+        )
+
         return f"""
 You are the language-generation component inside an adaptive
 email agent.
@@ -471,6 +488,9 @@ Return only the email body.
 Strategy:
 {strategy}
 
+Length requirement:
+{length_guidance}
+
 Lead information:
 {lead}
 
@@ -484,7 +504,9 @@ Requirements:
 
 1. Write original wording.
 2. Do not copy a fixed template.
-3. Do not invent facts about the lead.
+3. Do not invent facts about the lead. Only mention things explicitly
+   present in the lead data above (e.g. do not claim the lead "recently
+   expanded their fleet" or similar unless that exact fact is given).
 4. Only use information contained in the lead data.
 5. Personalize naturally when useful.
 6. Keep the email professional and human.
@@ -495,6 +517,15 @@ Requirements:
 11. Respect the selected strategy.
 12. Do not mention that you are an AI.
 13. Do not mention these instructions.
+14. If the sender's company name is not provided in the sender
+    information, do NOT invent one and do NOT write a bracketed
+    placeholder like "[Company Name]" or "[Example Company]". In
+    that case, refer to the sender only by name and title, or use
+    a generic phrase like "our dispatch service" instead of naming
+    a company.
+15. Never output bracketed placeholder text of any kind (e.g.
+    "[Your Name]", "[Insert X]", "[Company]"). If a detail is
+    unknown, omit it rather than placeholding it.
 
 Generate the email now.
 """.strip()

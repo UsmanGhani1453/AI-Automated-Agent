@@ -1,4 +1,3 @@
-```python
 """
 Agent: the core loop.
 
@@ -159,10 +158,11 @@ class Agent:
     # Generate -> Analyze -> Evaluate -> Decide
     # ============================================================
 
-    def execute_generate_email(self, lead: dict):
+    def execute_generate_email(self, lead: dict, forced_strategy=None):
         result = self.generator.generate(
             lead,
             self.sender_info,
+            forced_strategy=forced_strategy,
         )
 
         self.stm.set(

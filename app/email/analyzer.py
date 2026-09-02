@@ -11,6 +11,12 @@ SPAM_MARKERS = [
     "guaranteed", "risk free", "100% free", "urgent", "hurry", "!!!",
 ]
 PLACEHOLDER_MARKERS = ["[your name]", "[company]", "[email]", "{{", "}}", "<insert", "[insert"]
+
+# Matches ANY square-bracket span, e.g. "[Example Company]", "[Company Name]",
+# "[Your Name]" — catches placeholder text an LLM invents that isn't in the
+# fixed-phrase list above. A real, finished email should never contain a
+# literal "[...]" span.
+PLACEHOLDER_BRACKET_RE = re.compile(r"\[[^\[\]]{2,40}\]")
 CTA_MARKERS = ["let's discuss", "reply to", "schedule a call", "reach out", "would love to",
                "let me know", "book a", "set up a", "connect this week", "would you be open to",
                "quick call", "happy to send", "just reply"]
@@ -60,7 +66,10 @@ class EmailAnalyzer:
         cta_score = 1.0 if any(m in lower for m in CTA_MARKERS) else 0.0
         spam_hits = sum(1 for m in SPAM_MARKERS if m in lower)
         spam_risk = min(1.0, spam_hits / 3)
-        placeholder_found = any(m in lower for m in PLACEHOLDER_MARKERS)
+        placeholder_found = (
+            any(m in lower for m in PLACEHOLDER_MARKERS)
+            or bool(PLACEHOLDER_BRACKET_RE.search(text))
+        )
 
         # repeated phrases: any 4-gram appearing more than once
         tokens = [w.lower() for w in words]
