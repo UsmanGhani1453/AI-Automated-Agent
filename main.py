@@ -1,9 +1,9 @@
 from __future__ import annotations
-import pandas 
 import argparse
 import csv
 import os
 import random
+import pandas
 
 from dotenv import load_dotenv
 
@@ -17,6 +17,7 @@ from app.database.repository import (
     FeedbackRepository,
     LeadRepository,
     PatternRepository,
+    SuppressionRepository,
 )
 from app.email.reply_generator import ReplyGenerator
 from app.learning.experience import Experience
@@ -495,6 +496,24 @@ def run_inbox(limit: int) -> None:
                 "no reply draft generated"
             )
 
+        # A clear opt-out/rejection must stop future outreach to this
+        # address, regardless of whether the draft reply above is ever
+        # sent. Add them to the suppression list now so the decision
+        # engine skips them on the next campaign run.
+        if analysis.get("intent") in ("not_interested", "unsubscribe"):
+            sender_email = analysis.get("sender_email", "")
+
+            if sender_email:
+                SuppressionRepository.add(
+                    sender_email,
+                    reason=f"inbox reply intent={analysis.get('intent')}",
+                )
+
+                print(
+                    f"\nAI action: SUPPRESSED — {sender_email} "
+                    "added to suppression list (opted out)"
+                )
+
         print("\n" + "-" * 70)
 
     print(
@@ -719,7 +738,11 @@ def main() -> None:
             "(--leads-file + --live)"
         ),
     )
-
+    parser.add_argument(
+        "--auto-reply",
+        action="store_true",
+        help="Check inbox and autonomously reply to safe emails.",
+    )
     parser.add_argument(
         "--strategy",
         type=str,
@@ -790,6 +813,29 @@ def main() -> None:
     # Gmail inbox
     # --------------------------------------------------------------
 
+    # --------------------------------------------------------------
+    # Autonomous Responder
+    # --------------------------------------------------------------
+    if args.auto_reply:
+        init_db()
+        
+        # Add safety confirmation for live auto-replies
+        if args.live:
+            print(
+                "\nAbout to run AUTO-REPLY in LIVE mode. "
+                "The agent will autonomously send real emails to incoming leads."
+            )
+            confirmation = input(
+                "Type 'yes' to continue, anything else to abort: "
+            )
+            if confirmation.strip().lower() != "yes":
+                print("Aborted. No live auto-replies were sent.")
+                return
+
+        agent = Agent(sender_info=SENDER, dry_run=not args.live)
+        agent.auto_respond_inbox(limit=args.limit)
+        return
+    
     if args.inbox:
         run_inbox(
             max(
@@ -816,9 +862,6 @@ def main() -> None:
             f"from '{args.leads_file}'."
         )
 
-        # A real lead list should never be looped multiple times
-        # in one run — that's how you accidentally email the same
-        # person 3+ times in a minute. --rounds is a demo-only knob.
         if args.rounds != 1:
             print(
                 "Note: --rounds is ignored for real leads "
@@ -842,7 +885,6 @@ def main() -> None:
             "--leads-file is required. Demo leads are disabled."
         )
 
-    # Run the agent after loading the real CSV leads.
     run_demo(
         args,
         leads,

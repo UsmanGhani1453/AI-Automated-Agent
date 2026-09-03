@@ -1,24 +1,17 @@
-"""
-Dashboard API for the adaptive email agent.
-
-The dashboard is responsible for:
-- viewing agent state
-- reviewing drafts
-- saving user edits
-- recording approval/rejection
-- triggering preference learning
-
-Sending remains disabled here for safety.
-"""
-
 from __future__ import annotations
 
 import os
+import pathlib
+
+from dotenv import load_dotenv
+load_dotenv()
 
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
+from app.email.sender import EmailSender
+from app.database.repository import LeadRepository
 
 from app.database.database import (
     get_conn,
@@ -110,11 +103,11 @@ def summary():
         replies = conn.execute(
             """
             SELECT COUNT(*) c
-            FROM feedback
-            WHERE replied=1
+            FROM replies
+            WHERE learned=1
             """
         ).fetchone()["c"]
-
+        
         avg_quality = conn.execute(
             "SELECT AVG(quality_score) a FROM emails"
         ).fetchone()["a"] or 0
@@ -462,44 +455,32 @@ def submit_feedback(
     email_id: int,
     request: FeedbackRequest,
 ):
-    email = EmailRepository.get(
-        email_id
-    )
-
+    email = EmailRepository.get(email_id)
     if not email:
-        raise HTTPException(
-            404,
-            "email not found",
-        )
+        raise HTTPException(404, "email not found")
 
     action = request.action.lower().strip()
-
-    if action not in {
-        "approve",
-        "reject",
-    }:
-        raise HTTPException(
-            400,
-            "action must be approve or reject",
-        )
+    if action not in {"approve", "reject"}:
+        raise HTTPException(400, "action must be approve or reject")
 
     if action == "approve":
-        rating = (
-            request.rating
-            if request.rating is not None
-            else 5
-        )
-
-        EmailRepository.approve(
-            email_id
-        )
-
+        rating = request.rating if request.rating is not None else 5
+        EmailRepository.approve(email_id)
+        
+        lead = LeadRepository.get(email["lead_id"])
+        if lead:
+            analyzer_report = email.get("analyzer_report", {})
+            subject = analyzer_report.get("reply_subject") or f"Freight Dispatching Services near {lead.get('location', '')}"
+            
+            final_body = email.get("user_edited_body") or email.get("body")
+            
+            sender = EmailSender() 
+            res = sender.send(lead["email"], subject, final_body)
+            
+            if res.get("status") in ["sent", "dry_run"]:
+                EmailRepository.mark_sent(email_id)
     else:
-        rating = (
-            request.rating
-            if request.rating is not None
-            else 2
-        )
+        rating = request.rating if request.rating is not None else 2
 
     FeedbackRepository.create(
         email_id=email_id,
@@ -517,20 +498,13 @@ def submit_feedback(
     }
 
 
-# ----------------------------------------------------------------------
-# Static dashboard
-# ----------------------------------------------------------------------
+_static_dir = pathlib.Path(__file__).parent / "static"
 
-_static_dir = os.path.join(
-    os.path.dirname(__file__),
-    "static",
-)
-
-if os.path.isdir(_static_dir):
+if _static_dir.is_dir():
     app.mount(
         "/",
         StaticFiles(
-            directory=_static_dir,
+            directory=str(_static_dir),
             html=True,
         ),
         name="static",

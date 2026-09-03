@@ -238,10 +238,20 @@ class ReplyGenerator:
     def _opening_for_intent(self, analysis: dict) -> str:
         intent = analysis["intent"]
 
+        if intent == "not_interested":
+            return (
+                "Thanks for letting me know."
+            )
+
         if intent == "meeting_request":
             return (
                 "Thanks for reaching out. "
                 "I’ve noted your request for a quick call."
+            )
+
+        if intent == "price_request":
+            return (
+                "Thanks for asking about our pricing."
             )
 
         if intent == "information_request":
@@ -280,6 +290,12 @@ class ReplyGenerator:
         """
         intent = analysis["intent"]
 
+        if intent == "not_interested":
+            return (
+                "No worries at all — I won’t follow up "
+                "further. Wishing you the best."
+            )
+
         if intent == "meeting_request":
             time_reference = analysis.get(
                 "time_reference"
@@ -295,6 +311,16 @@ class ReplyGenerator:
             return (
                 "I’ll confirm the timing before sending "
                 "a final confirmation."
+            )
+
+        if intent == "price_request":
+            # Pricing is a real commercial commitment, not a fact this
+            # agent should assert on its own — this draft is held for
+            # human review (see `requires_human_decision` below) rather
+            # than sent automatically with a hardcoded rate.
+            return (
+                "I’ll confirm our current pricing/rate for your lanes "
+                "and send it over shortly."
             )
 
         if intent == "information_request":
@@ -445,6 +471,7 @@ class ReplyGenerator:
         ] in {
             "meeting_request",
             "approval_request",
+            "price_request",
         }
 
         return {
@@ -468,4 +495,3 @@ class ReplyGenerator:
                 requires_human_decision
             ),
         }
-        

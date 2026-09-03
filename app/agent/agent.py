@@ -833,3 +833,87 @@ class Agent:
         #   send_failed  -> remains send_failed
 
         return log
+
+    # ============================================================
+    # AUTONOMOUS RESPONDER LOOP
+    # ============================================================
+    def auto_respond_inbox(self, limit=10):
+        """
+        Fetches unread mail, learns from it, and automatically replies
+        IF the intent is safe (requires_human_decision == False).
+        """
+        from app.tools.gmail_inbox import GmailInbox
+        from app.email.reply_generator import ReplyGenerator
+        from app.memory.conversation import ConversationMemory
+
+        print("\nChecking inbox for new replies...")
+        inbox = GmailInbox()
+        generator = ReplyGenerator(self.sender_info)
+        conversations = ConversationMemory()
+        
+        try:
+            messages = inbox.fetch_unread(limit=limit)
+        except Exception as e:
+            print(f"Failed to fetch inbox: {e}")
+            return
+
+        if not messages:
+            print("No new messages.")
+            return
+
+        for message in messages:
+            sender_email = message.get("from_email", "unknown")
+            print(f"\nProcessing message from: {sender_email}")
+
+            # 1. Process and Learn (updates strategy scores based on intent)
+            self.process_reply(message)
+
+            # 2. Ingest conversation context and generate a draft
+            context = conversations.ingest(message)
+            draft = generator.draft(message, conversation_context=context)
+
+            if not draft["should_reply"]:
+                print(f" -> No reply needed (Category: {draft.get('category')})")
+                continue
+
+            # 3. Evaluate Safety
+            if draft["requires_human_decision"]:
+                print(f" -> HOLDING DRAFT: Human decision required for intent '{draft['analysis']['intent']}'.")
+                
+                # --- Queue draft for the dashboard ---
+                lead = LeadRepository.get_by_email(sender_email)
+                if lead:
+                    report = draft["analysis"]
+                    report["reply_subject"] = draft["subject"]
+                    
+                    email_id = EmailRepository.create(
+                        lead_id=lead["id"],
+                        strategy="INBOX_REPLY",
+                        components={},
+                        body=draft["body"],
+                        quality_score=1.0,
+                        analyzer_report=report,
+                    )
+                    print(f" -> Draft successfully queued for dashboard review (Email ID: {email_id}).")
+                else:
+                    print(" -> Unknown lead. Cannot queue draft.")
+            
+            else:
+                # --- AUTONOMOUS DISPATCH (Safe intents like price_request) ---
+                print(f" -> SAFE INTENT: Auto-sending reply for '{draft['analysis']['intent']}'...")
+                
+                try:
+                    # Use the agent's built-in tool registry which handles live SMTP transmission safely
+                    result = self.tools.call(
+                        "gmail",
+                        recipient_email=sender_email,
+                        subject=draft["subject"],
+                        body=draft["body"],
+                    )
+                    
+                    if result.get("status") == "sent":
+                        print(f" -> Successfully sent autonomous reply to {sender_email}!")
+                    else:
+                        print(f" -> ERROR: Send failed: {result.get('error', 'unknown error')}")
+                except Exception as e:
+                    print(f" -> ERROR: Failed to send reply: {e}")
